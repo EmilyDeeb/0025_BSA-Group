@@ -1,0 +1,109 @@
+// ════════════════════════════════════════════════════════════════
+// CORDILLERA BLANCA — BACKEND PART 2 (BASIN RISK TABLE)
+// Goal: Load pre-computed raster assets, calculate Hazard and 
+// Exposure across all basins, and export the Master Impact Table.
+// ════════════════════════════════════════════════════════════════
+
+// ── 1. ASSETS ────────────────────────────────────────────────────
+var PROJECT = 'users/emilymdeeb/GroupProject/';
+var STUDY_AREA = ee.Geometry.Rectangle([-77.8, -10.0, -77.0, -8.5]);
+
+var A_lake1990   = ee.Image(PROJECT + 'lake_1990').rename('water');
+var A_lake2021   = ee.Image(PROJECT + 'lake_2021').rename('water');
+var A_lakePoly   = ee.FeatureCollection(PROJECT + 'lake_polygons');
+var A_glac2019   = ee.Image(PROJECT + 'glacier_2019').rename('glacier');
+var A_glac2025   = ee.Image(PROJECT + 'glacier_2025').rename('glacier');
+var A_glacLoss   = ee.Image(PROJECT + 'glacier_loss').rename('glacier_loss');
+var A_cropland   = ee.Image(PROJECT + 'exposed_landcover').rename('exposed');
+var A_bofedales  = ee.Image(PROJECT + 'bofedales').rename('exposed');
+var A_agri       = ee.Image(PROJECT + 'agriculture').rename('exposed');
+var A_settl      = ee.Image(PROJECT + 'settlements_dw2024').rename('settlement');
+var A_pop        = ee.Image(PROJECT + 'population_2020').rename('population'); 
+
+var dem   = ee.Image('USGS/SRTMGL1_003').clip(STUDY_AREA);
+var slope = ee.Terrain.slope(dem).rename('slope');
+var basins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_12')
+  .filterBounds(STUDY_AREA);
+
+var MEAN_LAKE_GROWTH_PCT = 30.9;
+var MEAN_GLAC_LOSS_PCT   = 7.32;
+
+// ── 2. CALCULATE BASIN IMPACT ─────────────────────────────────────
+var basinStats = basins.map(function(basin) {
+  var basinGeom = basin.geometry();
+  
+  // A. Reduce flat raster assets (Fast!)
+  var lakeKm2Val = ee.Number(A_lake2021.reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('water', 0)).multiply(0.0009);
+  var lake1990Val = ee.Number(A_lake1990.reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('water', 0)).multiply(0.0009);
+  var glac2025Val = ee.Number(A_glac2025.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:20, maxPixels:1e10, tileScale: 4}).get('glacier', 0)).divide(1e6);
+  var glac2019Val = ee.Number(A_glac2019.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:20, maxPixels:1e10, tileScale: 4}).get('glacier', 0)).divide(1e6);
+  var glacLossVal = ee.Number(A_glacLoss.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:20, maxPixels:1e10, tileScale: 4}).get('glacier_loss', 0)).divide(1e6);
+  var slopeVal = ee.Number(slope.reduceRegion({reducer:ee.Reducer.mean(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('slope', 0));
+  var cropVal = ee.Number(A_cropland.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('exposed', 0)).divide(1e6);
+  var settVal = ee.Number(A_settl.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:10, maxPixels:1e13, tileScale: 4}).get('settlement', 0)).divide(1e6);
+  var bofedVal = ee.Number(A_bofedales.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('exposed', 0)).divide(1e6);
+  var agriVal = ee.Number(A_agri.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('exposed', 0)).divide(1e6);
+  var popVal = ee.Number(A_pop.reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:100, maxPixels:1e10, tileScale: 4}).get('population', 0));
+  var basinKm2Val = ee.Number(basinGeom.area(1)).divide(1e6);
+
+  var basinLakes = A_lakePoly.filterBounds(basinGeom);
+  var slaVal = ee.Number(ee.Algorithms.If(basinLakes.size().gt(0), basinLakes.aggregate_mean('sla_deg'), 0));
+
+  // B. Server-Side FLOOD Hazard Logic (0-100)
+  var dynamicFailure = slopeVal.gt(30).or(slopeVal.gt(45));
+  var selfDestructive = slaVal.gte(10);
+
+  var floodBaseScore = ee.Number(ee.Algorithms.If(
+    dynamicFailure.and(selfDestructive), 90,
+    ee.Algorithms.If(dynamicFailure.and(selfDestructive.not()), 65,
+      ee.Algorithms.If(dynamicFailure.not().and(selfDestructive), 45, 20))
+  ));
+
+  var basinLakeGrowthPct = ee.Number(ee.Algorithms.If(lake1990Val.gt(0), lakeKm2Val.subtract(lake1990Val).divide(lake1990Val).multiply(100), 0));
+  var basinGlacLossPct = ee.Number(ee.Algorithms.If(glac2019Val.gt(0), glacLossVal.divide(glac2019Val).multiply(100), 0));
+
+  var floodHazard = ee.Number(ee.Algorithms.If(
+    basinLakeGrowthPct.gt(MEAN_LAKE_GROWTH_PCT).and(basinGlacLossPct.gt(MEAN_GLAC_LOSS_PCT)),
+    floodBaseScore.add(25).min(90), 
+    floodBaseScore
+  )).round();
+
+  // C. Server-Side DROUGHT Hazard Logic (0-100)
+  var droughtBaseScore = ee.Number(
+    ee.Algorithms.If(cropVal.gt(20), 85,
+      ee.Algorithms.If(cropVal.gt(10), 60,
+        ee.Algorithms.If(cropVal.gt(2), 35, 15)))
+  );
+  
+  droughtBaseScore = ee.Number(ee.Algorithms.If(bofedVal.gt(0.5), droughtBaseScore.add(10), droughtBaseScore));
+  var settDensityPct = settVal.divide(basinKm2Val.max(0.001)).multiply(100);
+  
+  droughtBaseScore = ee.Number(ee.Algorithms.If(settDensityPct.gt(2), droughtBaseScore.add(10),
+    ee.Algorithms.If(settDensityPct.gt(1), droughtBaseScore.add(5), droughtBaseScore)));
+
+  var droughtHazard = droughtBaseScore.min(100).round();
+
+  // D. EXPOSURE & IMPACT Calculation (0-100)
+  var popScore = popVal.divide(20000).min(1.0).multiply(50);
+  var agriScore = agriVal.divide(20).min(1.0).multiply(50);
+  var exposureScore = popScore.add(agriScore); 
+
+  var floodImpact = floodHazard.divide(100).multiply(exposureScore).round();
+  var droughtImpact = droughtHazard.divide(100).multiply(exposureScore).round();
+
+  // Attach ALL properties to the basin feature so the frontend UI can read them instantly
+  return basin.set({
+    'flood_hazard': floodHazard,
+    'drought_hazard': droughtHazard,
+    'exposure_score': exposureScore.round(),
+    'flood_impact': floodImpact,
+    'drought_impact': droughtImpact
+  });
+});
+
+// ── 3. EXPORT ─────────────────────────────────────────────────────
+Export.table.toAsset({
+  collection: basinStats,
+  description: 'master_basin_risk',
+  assetId: PROJECT + 'master_basin_risk'
+});

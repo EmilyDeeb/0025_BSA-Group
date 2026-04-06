@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// CORDILLERA BLANCA — MASTER ANALYSIS + EXPORTS (BACKEND)
+// CORDILLERA BLANCA — BACKEND PART 1 (Main Layer Export)
 // CASA0025 Group Project
 // ════════════════════════════════════════════════════════════════
 
@@ -618,96 +618,6 @@ Map.addLayer(popDataset.selfMask(), {
 }, 'Population Density (WorldPop)', false);
 
 // ════════════════════════════════════════════════════════════════
-// BASIN-LEVEL RISK INTEGRATION
-// Goal: Calculate Flood & Drought Hazard, combine with Population 
-// & Agriculture Exposure, and export a master Impact table.
-// ════════════════════════════════════════════════════════════════
-
-var basins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_12')
-  .filterBounds(studyArea);
-
-var MEAN_LAKE_GROWTH_PCT = 30.9;
-var MEAN_GLAC_LOSS_PCT   = 7.32;
-
-var basinStats = basins.map(function(basin) {
-  var basinGeom = basin.geometry();
-  
-  // ── 1. Calculate all physical variables for this basin ──────────
-  var lakeKm2 = ee.Number(lakeMask2021.reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10}).get('water', 0)).multiply(0.0009);
-  var lake1990Km2 = ee.Number(lakeMask1990.reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10}).get('water', 0)).multiply(0.0009);
-  var glacLossKm2 = ee.Number(glacierLoss.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:20, maxPixels:1e10}).get('glacier_loss', 0)).divide(1e6);
-  var glac2019Km2 = ee.Number(glacierMask2019.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:20, maxPixels:1e10}).get('glacier', 0)).divide(1e6);
-  var slopeDeg = ee.Number(slope.reduceRegion({reducer:ee.Reducer.mean(), geometry:basinGeom, scale:30, maxPixels:1e10}).get('slope', 0));
-  
-  var basinLakes = lakeGrowthStatsClean.filterBounds(basinGeom);
-  var slaDeg = ee.Number(ee.Algorithms.If(basinLakes.size().gt(0), basinLakes.aggregate_mean('sla_deg'), 0));
-  
-  var cropKm2 = ee.Number(allExposed.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10}).get('exposed', 0)).divide(1e6);
-  var settKm2 = ee.Number(settlementDW.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:10, maxPixels:1e13, tileScale: 4}).get('settlement', 0)).divide(1e6);
-  var bofedKm2 = ee.Number(bofedales.and(agriElev).multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10}).get('classification_2024', 0)).divide(1e6);
-  var pop = ee.Number(popDataset.reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:100, maxPixels:1e10}).get('population', 0));
-  var agriKm2 = ee.Number(mosaico.and(agriElev).multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10}).get('classification_2024', 0)).divide(1e6);
-  var basinKm2 = ee.Number(basinGeom.area(1)).divide(1e6);
-
-  // ── 2. Server-Side FLOOD Hazard Logic (0-100) ───────────────────
-  var dynamicFailure = slopeDeg.gt(30).or(slopeDeg.gt(45));
-  var selfDestructive = slaDeg.gte(10);
-
-  var floodBaseScore = ee.Number(ee.Algorithms.If(
-    dynamicFailure.and(selfDestructive), 90,
-    ee.Algorithms.If(dynamicFailure.and(selfDestructive.not()), 65,
-      ee.Algorithms.If(dynamicFailure.not().and(selfDestructive), 45, 20))
-  ));
-
-  var basinLakeGrowthPct = ee.Number(ee.Algorithms.If(lake1990Km2.gt(0), lakeKm2.subtract(lake1990Km2).divide(lake1990Km2).multiply(100), 0));
-  var basinGlacLossPct = ee.Number(ee.Algorithms.If(glac2019Km2.gt(0), glacLossKm2.divide(glac2019Km2).multiply(100), 0));
-
-  var floodHazard = ee.Number(ee.Algorithms.If(
-    basinLakeGrowthPct.gt(MEAN_LAKE_GROWTH_PCT).and(basinGlacLossPct.gt(MEAN_GLAC_LOSS_PCT)),
-    floodBaseScore.add(25).min(90), 
-    floodBaseScore
-  )).round();
-
-  // ── 3. Server-Side DROUGHT Hazard Logic (0-100) ─────────────────
-  var droughtBaseScore = ee.Number(
-    ee.Algorithms.If(cropKm2.gt(20), 85,
-      ee.Algorithms.If(cropKm2.gt(10), 60,
-        ee.Algorithms.If(cropKm2.gt(2), 35, 15)))
-  );
-  
-  droughtBaseScore = ee.Number(ee.Algorithms.If(bofedKm2.gt(0.5), droughtBaseScore.add(10), droughtBaseScore));
-  var settDensityPct = settKm2.divide(basinKm2.max(0.001)).multiply(100);
-  
-  droughtBaseScore = ee.Number(ee.Algorithms.If(settDensityPct.gt(2), droughtBaseScore.add(10),
-    ee.Algorithms.If(settDensityPct.gt(1), droughtBaseScore.add(5), droughtBaseScore)));
-
-  var droughtHazard = droughtBaseScore.min(100).round();
-
-  // ── 4. EXPOSURE & IMPACT Calculation (0-100) ────────────────────
-  // Max 50 points for population (caps at 20,000 people)
-  var popScore = pop.divide(20000).min(1.0).multiply(50);
-  // Max 50 points for agriculture (caps at 20 km2)
-  var agriScore = agriKm2.divide(20).min(1.0).multiply(50);
-  var exposureScore = popScore.add(agriScore); // Max 100
-
-  // Final Impact = (Hazard % * Exposure Score)
-  var floodImpact = floodHazard.divide(100).multiply(exposureScore).round();
-  var droughtImpact = droughtHazard.divide(100).multiply(exposureScore).round();
-
-  // ── 5. Attach properties to the basin feature ───────────────────
-  return basin.set({
-    'pop_total': pop,
-    'agri_km2': agriKm2,
-    'flood_hazard': floodHazard,
-    'drought_hazard': droughtHazard,
-    'exposure_score': exposureScore.round(),
-    'flood_impact': floodImpact,
-    'drought_impact': droughtImpact
-  });
-});
-
-
-// ════════════════════════════════════════════════════════════════
 // EXPORTS
 //
 // Goal: save all computed layers as permanent GEE assets so the
@@ -854,13 +764,6 @@ Export.image.toAsset({
   region:      studyArea,
   scale:       100,      // WorldPop is natively 100m resolution
   maxPixels:   1e10
-});
-
-// ── Basin Risk ───────────────────────────────────────────
-Export.table.toAsset({
-  collection: basinStats,
-  description: 'master_basin_risk',
-  assetId: PROJECT + 'master_basin_risk'
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -1154,43 +1057,3 @@ ee.Dictionary({
   print('Total population > 0:', 
     t > 0 ? '✓ PASS' : '✗ FAIL — no people detected');
 });
-
-// ── Master Table Validation ───────────────────────────────────────
-// Goal: Grab a sample of 3 basins to verify that the new 
-// Hazard x Exposure = Impact math is working perfectly before 
-// trusting the exported asset.
-
-var sampleBasins = basinStats.limit(3).getInfo(); 
-
-print('════ Impact Math Validation (3 Basin Sample) ════');
-
-if (sampleBasins && sampleBasins.features) {
-  sampleBasins.features.forEach(function(feat, index) {
-    var p = feat.properties;
-    
-    // Safety check in case a basin has no HYBAS_ID
-    var basinName = p.HYBAS_ID || 'Unknown';
-    
-    print('▶ Basin ' + (index + 1) + ' (ID: ' + basinName + ')');
-    
-    // 1. Verify Exposure limits
-    print('  Pop: ' + Math.round(p.pop_total) + ' | Agri: ' + p.agri_km2.toFixed(2) + ' km²');
-    print('  -> Exposure Score (0-100): ' + p.exposure_score);
-    
-    // 2. Verify Flood Math: (Hazard / 100) * Exposure = Impact
-    var expectedFlood = Math.round((p.flood_hazard / 100) * p.exposure_score);
-    var floodCheck = (p.flood_impact === expectedFlood) ? '✓ PASS' : '✗ FAIL';
-    
-    print('  Flood: ' + p.flood_hazard + ' (Hazard) × ' + 
-          p.exposure_score + ' (Exp) = ' + p.flood_impact + ' (Impact) ' + floodCheck);
-          
-    // 3. Verify Drought Math: (Hazard / 100) * Exposure = Impact
-    var expectedDrought = Math.round((p.drought_hazard / 100) * p.exposure_score);
-    var droughtCheck = (p.drought_impact === expectedDrought) ? '✓ PASS' : '✗ FAIL';
-    
-    print('  Drought: ' + p.drought_hazard + ' (Hazard) × ' + 
-          p.exposure_score + ' (Exp) = ' + p.drought_impact + ' (Impact) ' + droughtCheck);
-  });
-} else {
-  print('⚠ Validation could not load sample basins.');
-}
