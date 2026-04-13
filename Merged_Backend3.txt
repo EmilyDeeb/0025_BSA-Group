@@ -1,0 +1,858 @@
+// ════════════════════════════════════════════════════════════════
+// CORDILLERA BLANCA — BACKEND PART 3 (VALIDATION + STATISTICS)
+// CASA0025 Group Project
+// Run this AFTER Backend 1 and Backend 2 have finished exporting.
+// ════════════════════════════════════════════════════════════════
+
+// ── 1. LOAD ASSETS ───────────────────────────────────────────────
+var PROJECT   = 'projects/cordillera-blanca-risk-app/assets/';
+var STUDY_AREA = ee.FeatureCollection(PROJECT + 'boundbox').first().geometry();
+
+var masterRisk = ee.FeatureCollection(PROJECT + 'master_basin_risk');
+var A_lake2010 = ee.Image(PROJECT + 'lake_2010');
+var A_lake2021 = ee.Image(PROJECT + 'lake_2021');
+var A_glac2019 = ee.Image(PROJECT + 'glacier_2019');
+var A_glac2025 = ee.Image(PROJECT + 'glacier_2025');
+var A_settl    = ee.Image(PROJECT + 'settlements_dw2024');
+var A_cropland = ee.Image(PROJECT + 'exposed_landcover');
+var A_pop      = ee.Image(PROJECT + 'population_2020');
+var A_lakePoly = ee.FeatureCollection(PROJECT + 'lake_polygons');
+
+var slope  = ee.Terrain.slope(
+  ee.Image('USGS/SRTMGL1_003').clip(STUDY_AREA)
+).rename('slope');
+
+var basins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_12')
+  .filterBounds(STUDY_AREA)
+  .map(function(basin) {
+    return basin.intersection(STUDY_AREA, ee.ErrorMargin(1));
+  });
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 1 — ASSET INTEGRITY
+// Confirms all exported assets loaded correctly and every basin
+// in masterRisk carries the five primary risk fields.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 1 — ASSET INTEGRITY ════');
+print('Total basins in masterRisk:', masterRisk.size());
+print('Total basins in study area:', basins.size());
+print('masterRisk sample (first 2):', masterRisk.limit(2));
+
+ee.Dictionary({
+  flood_hazard:   masterRisk.filter(ee.Filter.notNull(['flood_hazard'])).size(),
+  drought_hazard: masterRisk.filter(ee.Filter.notNull(['drought_hazard'])).size(),
+  flood_impact:   masterRisk.filter(ee.Filter.notNull(['flood_impact'])).size(),
+  drought_impact: masterRisk.filter(ee.Filter.notNull(['drought_impact'])).size(),
+  exposure_score: masterRisk.filter(ee.Filter.notNull(['exposure_score'])).size(),
+  total:          masterRisk.size()
+}).evaluate(function(v) {
+  print('── Field completeness ──');
+  ['flood_hazard','drought_hazard','flood_impact',
+   'drought_impact','exposure_score'].forEach(function(f) {
+    print(f + ': ' + v[f] + '/' + v.total +
+      (v[f] === v.total ? ' ✓ PASS' : ' ✗ FAIL — null values, re-export Backend 2'));
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 2 — SCORE DISTRIBUTIONS
+// All scores are on a 0–100 scale. Standard deviation > 0 confirms
+// the model is differentiating between basins.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 2 — SCORE DISTRIBUTIONS ════');
+
+function fieldStats(fc, field) {
+  var values = fc.aggregate_array(field);
+  return ee.Dictionary({
+    min:    fc.aggregate_min(field),
+    max:    fc.aggregate_max(field),
+    mean:   fc.aggregate_mean(field),
+    std:    fc.aggregate_total_sd(field),
+    median: values.reduce(ee.Reducer.median())
+  });
+}
+
+ee.Dictionary({
+  flood_hazard:   fieldStats(masterRisk, 'flood_hazard'),
+  drought_hazard: fieldStats(masterRisk, 'drought_hazard'),
+  flood_impact:   fieldStats(masterRisk, 'flood_impact'),
+  drought_impact: fieldStats(masterRisk, 'drought_impact'),
+  exposure_score: fieldStats(masterRisk, 'exposure_score')
+}).evaluate(function(v) {
+  function ps(name, s) {
+    print(name + ':  min=' + s.min.toFixed(1) +
+          '  max=' + s.max.toFixed(1) +
+          '  mean=' + s.mean.toFixed(1) +
+          '  median=' + s.median.toFixed(1) +
+          '  std=' + s.std.toFixed(1));
+  }
+  print('── Descriptive statistics (0–100 scale) ──');
+  ps('flood_hazard  ', v.flood_hazard);
+  ps('drought_hazard', v.drought_hazard);
+  ps('flood_impact  ', v.flood_impact);
+  ps('drought_impact', v.drought_impact);
+  ps('exposure_score', v.exposure_score);
+
+  print('── Sanity checks ──');
+  print('flood_hazard min >= 20:',
+    v.flood_hazard.min >= 20 ? '✓ PASS' :
+    '✗ FAIL — guard clause should prevent scores below 20');
+  print('flood_hazard max <= 90:',
+    v.flood_hazard.max <= 90 ? '✓ PASS' :
+    '✗ FAIL — score capped at 90 in Backend 2');
+  print('flood_impact <= flood_hazard max:',
+    v.flood_impact.max <= v.flood_hazard.max ? '✓ PASS' :
+    '✗ FAIL — impact cannot exceed hazard');
+  print('All std > 0 (model is differentiating):',
+    v.flood_hazard.std > 0 && v.drought_hazard.std > 0 ? '✓ PASS' :
+    '⚠ CHECK — zero variance means all basins score the same');
+});
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 3 — TIER DISTRIBUTION
+// Checks scores spread across all four risk tiers.
+// A healthy distribution avoids all basins collapsing into one tier.
+// Tier boundaries: Low ≤25 | Medium 26–45 | High 46–65 | Very High >65
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 3 — TIER DISTRIBUTION ════');
+
+function tierCounts(fc, field, label) {
+  ee.Dictionary({
+    total:    fc.size(),
+    nLow:     fc.filter(ee.Filter.lte(field, 25)).size(),
+    nMedium:  fc.filter(ee.Filter.and(
+                ee.Filter.gt(field, 25), ee.Filter.lte(field, 45))).size(),
+    nHigh:    fc.filter(ee.Filter.and(
+                ee.Filter.gt(field, 45), ee.Filter.lte(field, 65))).size(),
+    nVeryHigh:fc.filter(ee.Filter.gt(field, 65)).size()
+  }).evaluate(function(v) {
+    var t = v.total || 1;
+    print('── ' + label + ' ──');
+    print('LOW       (≤25):  ' + v.nLow       + ' (' + ((v.nLow/t)*100).toFixed(0)       + '%)');
+    print('MEDIUM  (26–45):  ' + v.nMedium    + ' (' + ((v.nMedium/t)*100).toFixed(0)    + '%)');
+    print('HIGH    (46–65):  ' + v.nHigh      + ' (' + ((v.nHigh/t)*100).toFixed(0)      + '%)');
+    print('VERY HIGH (>65):  ' + v.nVeryHigh  + ' (' + ((v.nVeryHigh/t)*100).toFixed(0)  + '%)');
+    print('Multiple tiers populated:',
+      (v.nLow < t && v.nVeryHigh < t) ? '✓ PASS' :
+      '⚠ CHECK — all basins in one tier, review thresholds');
+  });
+}
+
+tierCounts(masterRisk, 'flood_hazard',   'Flood HAZARD');
+tierCounts(masterRisk, 'drought_hazard', 'Drought HAZARD (GDBDI)');
+tierCounts(masterRisk, 'flood_impact',   'Flood IMPACT');
+tierCounts(masterRisk, 'drought_impact', 'Drought IMPACT');
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 4 — POPULATION CALIBRATION
+// Confirms the 90th percentile threshold (6,000 people) used to
+// normalise population in the exposure score is appropriate.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 4 — POPULATION CALIBRATION ════');
+
+var totalPop = ee.Number(A_pop.reduceRegion({
+  reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+  scale:100, maxPixels:1e10, bestEffort:true
+}).get('population', 0));
+
+var basinPops = basins.map(function(basin) {
+  var pop = ee.Number(A_pop.clip(basin.geometry())
+    .reduceRegion({reducer:ee.Reducer.sum(), geometry:basin.geometry(),
+      scale:100, maxPixels:1e10, tileScale:4})
+    .get('population', 0));
+  return basin.set('pop', pop);
+});
+
+ee.Dictionary({
+  totalPop: totalPop,
+  maxPop:   basinPops.aggregate_max('pop'),
+  meanPop:  basinPops.aggregate_mean('pop'),
+  medPop:   basinPops.aggregate_array('pop').reduce(ee.Reducer.median()),
+  p75Pop:   basinPops.aggregate_array('pop').reduce(ee.Reducer.percentile([75])),
+  p90Pop:   basinPops.aggregate_array('pop').reduce(ee.Reducer.percentile([90]))
+}).evaluate(function(v) {
+  print('Total study area population:', Math.round(v.totalPop).toLocaleString());
+  print('Max population in any basin:', Math.round(v.maxPop).toLocaleString());
+  print('Mean population per basin:',  Math.round(v.meanPop).toLocaleString());
+  print('Median population per basin:', Math.round(v.medPop).toLocaleString());
+  print('75th percentile:', Math.round(v.p75Pop).toLocaleString());
+  print('90th percentile:', Math.round(v.p90Pop).toLocaleString());
+  print('90th percentile matches POP_THRESHOLD (6000):',
+    Math.round(v.p90Pop) >= 5000 && Math.round(v.p90Pop) <= 7000
+      ? '✓ PASS — threshold well-calibrated'
+      : '⚠ CHECK — consider updating POP_THRESHOLD in Backend 2');
+});
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 5 — KNOWN GLOF SPOT CHECKS
+// Five historically documented GLOF sites used as ground truth.
+// Each basin containing a known GLOF site should score HIGH or
+// VERY HIGH on flood hazard — if not, the decision tree needs review.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 5 — KNOWN GLOF SPOT CHECKS ════');
+
+var knownGLOFSites = [
+  {name:'Lake Palcacocha',    lon:-77.3743, lat:-9.3897,
+   note:'1941 GLOF — Mergili et al. 2020'},
+  {name:'Lake 513 (Carhuaz)', lon:-77.5667, lat:-9.2667,
+   note:'2010 GLOF — Klimes et al. 2015'},
+  {name:'Lake Rajucolta',     lon:-77.4333, lat:-9.7500,
+   note:'Documented GLOF — Emmer et al. 2022'},
+  {name:'Lake Artesoncocha',  lon:-77.6333, lat:-8.9833,
+   note:'High hazard proglacial — Rounce et al. 2016'},
+  {name:'Lake Llaca',         lon:-77.3833, lat:-9.4167,
+   note:'Moraine-dammed — Emmer & Vilimek 2014'}
+];
+
+knownGLOFSites.forEach(function(site) {
+  var point = ee.Geometry.Point([site.lon, site.lat]);
+  masterRisk.filterBounds(point).first().evaluate(function(f) {
+    if (!f) { print(site.name + ': ⚠ No basin found at this location'); return; }
+    var fh   = f.properties.flood_hazard   || 0;
+    var fi   = f.properties.flood_impact   || 0;
+    var ex   = f.properties.exposure_score || 0;
+    var tier = fh > 65 ? 'VERY HIGH' : fh > 45 ? 'HIGH' :
+               fh > 25 ? 'MEDIUM' : 'LOW';
+    print(site.name + ' — ' + site.note);
+    print('  flood_hazard=' + fh + '  tier=' + tier +
+          '  flood_impact=' + fi + '  exposure=' + Math.round(ex) +
+          (fh > 45 ? ' ✓ PASS' : ' ⚠ CHECK — expected HIGH or VERY HIGH'));
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 6 — CORRELATION TESTS
+// Three Pearson correlations test internal model consistency.
+//
+// With the GDBDI drought methodology, BOTH flood and drought hazard
+// are now structurally driven by glacier presence and loss.
+// Therefore flood_hazard vs drought_hazard is expected to be
+// POSITIVELY correlated (both peak in heavily glacierised basins).
+// This is a deliberate design outcome, not a flaw.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 6 — CORRELATION TESTS ════');
+
+ee.Dictionary({
+  floodDrought:   masterRisk.reduceColumns({
+    reducer:   ee.Reducer.pearsonsCorrelation(),
+    selectors: ['flood_hazard', 'drought_hazard']
+  }),
+  impacts: masterRisk.reduceColumns({
+    reducer:   ee.Reducer.pearsonsCorrelation(),
+    selectors: ['flood_impact', 'drought_impact']
+  }),
+  hazardExposure: masterRisk.reduceColumns({
+    reducer:   ee.Reducer.pearsonsCorrelation(),
+    selectors: ['flood_hazard', 'exposure_score']
+  })
+}).evaluate(function(v) {
+  print('── Pearson correlation coefficients ──');
+  print('(r = 1.0 = perfect positive | 0 = none | -1.0 = perfect negative)');
+
+  var r1 = v.floodDrought.correlation   || 0;
+  var r2 = v.impacts.correlation        || 0;
+  var r3 = v.hazardExposure.correlation || 0;
+
+  print('flood_hazard vs drought_hazard: r=' + r1.toFixed(3));
+  print('  Expected: moderate positive (0.2–0.7) — both hazards are glacier-driven');
+  print('  with GDBDI. Basins with large glaciers score high on both.');
+  print('  Result:', (r1 > 0.1 && r1 < 0.8)
+    ? '✓ PASS — consistent with dual glacier dependence'
+    : '⚠ CHECK — unexpected correlation, review GDBDI dimension weights');
+
+  print('flood_impact vs drought_impact: r=' + r2.toFixed(3));
+  print('  Expected: strong positive (> 0.5) — same populated basins drive both impacts');
+  print('  Result:', r2 > 0.5
+    ? '✓ PASS — exposure layer consistently applied across both hazards'
+    : '⚠ CHECK — impacts diverging, review exposure score calculation');
+
+  print('flood_hazard vs exposure_score: r=' + r3.toFixed(3));
+  print('  Expected: near zero (-0.3 to 0.3) — hazard should be independent of population');
+  print('  Glaciated headwater basins tend to be sparsely populated.');
+  print('  Result:', Math.abs(r3) < 0.3
+    ? '✓ PASS — hazard and exposure appropriately independent'
+    : '⚠ CHECK — possible spatial bias between glaciated and populated basins');
+});
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 7 — TOP 10 HIGHEST RISK BASINS
+// Highest impact basins should be cross-validated against
+// Section 5 GLOF sites and Section 9 map visualisation.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 7 — TOP 10 HIGHEST RISK BASINS ════');
+
+masterRisk.sort('flood_impact', false).limit(10).evaluate(function(fc) {
+  print('── Top 10 by flood impact ──');
+  fc.features.forEach(function(f, i) {
+    var p = f.properties;
+    print((i+1) + '. HYBAS_ID=' + p.HYBAS_ID +
+          '  flood_hazard=' + p.flood_hazard +
+          '  exposure=' + Math.round(p.exposure_score) +
+          '  flood_impact=' + p.flood_impact);
+  });
+});
+
+masterRisk.sort('drought_impact', false).limit(10).evaluate(function(fc) {
+  print('── Top 10 by drought impact ──');
+  fc.features.forEach(function(f, i) {
+    var p = f.properties;
+    print((i+1) + '. HYBAS_ID=' + p.HYBAS_ID +
+          '  drought_hazard=' + p.drought_hazard +
+          '  exposure=' + Math.round(p.exposure_score) +
+          '  drought_impact=' + p.drought_impact);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 8 — RASTER ASSET VALIDATION
+// Cross-checks key area statistics from the exported rasters
+// against known physical expectations for the Cordillera Blanca.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 8 — RASTER ASSET VALIDATION ════');
+ 
+// ── 8a. Lake & glacier core stats ────────────────────────────────
+ee.Dictionary({
+  lake2010: ee.Number(A_lake2010.reduceRegion({
+    reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+    scale:30, maxPixels:1e10, bestEffort:true
+  }).get('water', 0)).multiply(0.0009),
+ 
+  lake2021: ee.Number(A_lake2021.reduceRegion({
+    reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+    scale:30, maxPixels:1e10, bestEffort:true
+  }).get('water', 0)).multiply(0.0009),
+ 
+  glac2019: ee.Number(A_glac2019.multiply(ee.Image.pixelArea())
+    .reduceRegion({reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+      scale:20, maxPixels:1e10, bestEffort:true})
+    .get('glacier', 0)).divide(1e6),
+ 
+  glac2025: ee.Number(A_glac2025.multiply(ee.Image.pixelArea())
+    .reduceRegion({reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+      scale:20, maxPixels:1e10, bestEffort:true})
+    .get('glacier', 0)).divide(1e6),
+ 
+  settArea: ee.Number(A_settl.multiply(ee.Image.pixelArea())
+    .reduceRegion({reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+      scale:10, maxPixels:1e13, tileScale:4, bestEffort:true})
+    .get('settlement', 0)).divide(1e6),
+ 
+  totalPop: ee.Number(A_pop.reduceRegion({
+    reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+    scale:100, maxPixels:1e10, bestEffort:true
+  }).get('population', 0)),
+ 
+  studyKm2: ee.Number(STUDY_AREA.area(1)).divide(1e6)
+ 
+}).evaluate(function(v) {
+  var lakeChg  = ((v.lake2021 - v.lake2010) / v.lake2010 * 100);
+  var glacChg  = ((v.glac2025 - v.glac2019) / v.glac2019 * 100);
+  var annRate  = glacChg / 6; // 2019–2025 = 6 years
+  var settDens = (v.settArea / v.studyKm2 * 100);
+ 
+  print('── 8a. Lake statistics (2010–2021) ──');
+  print('Lake area 2010:', v.lake2010.toFixed(3) + ' km²',
+    v.lake2010 > 25 ? '✓' : '⚠ below expected ~40 km²');
+  print('Lake area 2021:', v.lake2021.toFixed(3) + ' km²',
+    v.lake2021 > v.lake2010 ? '✓ grew' : '⚠ unexpected decrease');
+  print('Lake change:', lakeChg.toFixed(1) + '%',
+    Math.abs(lakeChg) < 50 ? '✓' : '⚠ implausibly large');
+ 
+  print('── 8b. Glacier statistics (2019–2025) ──');
+  print('Glacier 2019:', v.glac2019.toFixed(2) + ' km²',
+    (v.glac2019 > 200 && v.glac2019 < 800) ? '✓' : '⚠ outside expected 200–800 km²');
+  print('Glacier 2025:', v.glac2025.toFixed(2) + ' km²',
+    v.glac2025 < v.glac2019 ? '✓ receded' : '⚠ unexpected increase');
+  print('Glacier change:', glacChg.toFixed(1) + '%',
+    glacChg < 0 ? '✓ negative (recession confirmed)' : '⚠ check S2 composite');
+  print('Annual recession rate:', annRate.toFixed(2) + '% yr⁻¹',
+    Math.abs(annRate) < 5 ? '✓' : '⚠ high rate, review threshold');
+ 
+  print('── 8c. Settlement statistics (2024) ──');
+  print('Settlement area:', v.settArea.toFixed(2) + ' km²',
+    (v.settArea > 0 && v.settArea < 200) ? '✓' : '⚠ review DW threshold');
+  print('Study area:', v.studyKm2.toFixed(2) + ' km²');
+  print('Settlement density:', settDens.toFixed(2) + '%',
+    settDens < 20 ? '✓' : '⚠ unusually high density');
+ 
+  print('── 8d. Population (2020) ──');
+  print('Total population:', Math.round(v.totalPop).toLocaleString(),
+    v.totalPop > 0 ? '✓' : '✗ FAIL — no population detected');
+});
+ 
+// ── 8e. Land cover breakdown by class ────────────────────────────
+// Reconstructs MapBiomas classes from the exposed_landcover asset
+// using the same elevation mask applied in Backend 1 (2000–3800m).
+// DEM loaded fresh here — Backend 3 doesn't carry it from Backend 1.
+var dem8    = ee.Image('USGS/SRTMGL1_003').clip(STUDY_AREA);
+var agriElev8 = dem8.gte(2000).and(dem8.lte(3800));
+ 
+var mapbiomas8 = ee.Image(
+  'projects/mapbiomas-public/assets/peru/collection3/' +
+  'mapbiomas_peru_collection3_integration_v1'
+).clip(STUDY_AREA).select('classification_2024');
+ 
+var mosaic8    = mapbiomas8.eq(21);
+var pastures8  = mapbiomas8.eq(15);
+var bofedales8 = mapbiomas8.eq(11);
+var pajonales8 = mapbiomas8.eq(12);
+ 
+ee.Dictionary({
+  mosaic:   ee.Number(mosaic8.and(agriElev8).multiply(ee.Image.pixelArea())
+    .reduceRegion({reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+      scale:30, maxPixels:1e10, bestEffort:true})
+    .get('classification_2024', 0)).divide(1e6),
+ 
+  pastures: ee.Number(pastures8.and(agriElev8).multiply(ee.Image.pixelArea())
+    .reduceRegion({reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+      scale:30, maxPixels:1e10, bestEffort:true})
+    .get('classification_2024', 0)).divide(1e6),
+ 
+  bofed:    ee.Number(bofedales8.and(agriElev8).multiply(ee.Image.pixelArea())
+    .reduceRegion({reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+      scale:30, maxPixels:1e10, bestEffort:true})
+    .get('classification_2024', 0)).divide(1e6),
+ 
+  grass:    ee.Number(pajonales8.and(agriElev8).multiply(ee.Image.pixelArea())
+    .reduceRegion({reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+      scale:30, maxPixels:1e10, bestEffort:true})
+    .get('classification_2024', 0)).divide(1e6),
+ 
+  cropArea: ee.Number(A_cropland.multiply(ee.Image.pixelArea())
+    .reduceRegion({reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+      scale:30, maxPixels:1e10, bestEffort:true})
+    .get('exposed', 0)).divide(1e6)
+ 
+}).evaluate(function(v) {
+  var mosaic   = v.mosaic   || 0;
+  var pastures = v.pastures || 0;
+  var bofed    = v.bofed    || 0;
+  var grass    = v.grass    || 0;
+  var total    = mosaic + pastures + bofed + grass;
+ 
+  print('── 8e. Land cover statistics (2024, 2000–3800m) ──');
+  print('Agriculture mosaic (21):', mosaic.toFixed(2)   + ' km²');
+  print('Managed pastures (15):',  pastures.toFixed(2)  + ' km²');
+  print('Bofedales (11):',         bofed.toFixed(2)     + ' km²');
+  print('Puna grasslands (12):',   grass.toFixed(2)     + ' km²');
+  print('Total exposed (sum):',    total.toFixed(2)     + ' km²');
+  print('Exposed asset total:',    (v.cropArea||0).toFixed(2) + ' km²',
+    Math.abs(total - (v.cropArea||0)) < 5
+      ? '✓ consistent with exported asset'
+      : '⚠ mismatch — re-export exposed_landcover');
+  print('All classes > 0:',
+    (mosaic>0 && pastures>0 && bofed>0 && grass>0)
+      ? '✓ PASS' : '⚠ Some classes empty — check class codes');
+  print('Total < 5000 km²:',
+    total < 5000 ? '✓ PASS' : '⚠ CHECK — very large, review elevation mask');
+});
+ 
+// ── 8f. Exposed population ────────────────────────────────────────
+// Population living on glacier-dependent land cover (all 4 classes)
+var allExposed8 = mosaic8.or(pastures8).or(bofedales8).or(pajonales8)
+  .and(agriElev8);
+ 
+ee.Dictionary({
+  total:   ee.Number(A_pop.reduceRegion({
+    reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+    scale:100, maxPixels:1e10, bestEffort:true
+  }).get('population', 0)),
+  exposed: ee.Number(A_pop.updateMask(allExposed8).reduceRegion({
+    reducer:ee.Reducer.sum(), geometry:STUDY_AREA,
+    scale:100, maxPixels:1e10, bestEffort:true
+  }).get('population', 0))
+}).evaluate(function(v) {
+  var t   = v.total   || 0;
+  var e   = v.exposed || 0;
+  var pct = t > 0 ? (e / t * 100) : 0;
+  print('── 8f. Exposed population ──');
+  print('Total population:',   Math.round(t).toLocaleString() + ' people');
+  print('Exposed population:', Math.round(e).toLocaleString() + ' people');
+  print('% exposed:',          pct.toFixed(1) + '%');
+  print('Exposed pop > 0:',
+    e > 0 ? '✓ PASS' : '⚠ CHECK — no exposed population detected');
+});
+ 
+// ── 8g. Glacier–lake overlap (cross-layer validation) ────────────
+// Physically these should not overlap — a pixel cannot be both
+// glacier ice and open water. Small overlap (<5 km²) is acceptable
+// due to pixel edge effects at the ice–lake boundary.
+ee.Number(A_glac2019.and(A_lake2021)
+  .rename('overlap')
+  .multiply(ee.Image.pixelArea())
+  .reduceRegion({
+    reducer:   ee.Reducer.sum(),
+    geometry:  STUDY_AREA,
+    scale:     30,
+    maxPixels: 1e10,
+    bestEffort:true
+  }).get('overlap', 0)).divide(1e6)
+  .evaluate(function(v) {
+    print('── 8g. Glacier 2019 / Lake 2021 overlap ──');
+    print('Overlap area:', (v||0).toFixed(3) + ' km²',
+      (v||0) < 5
+        ? '✓ PASS — within acceptable range'
+        : '⚠ CHECK — possible misclassification between ice and water');
+  });
+ 
+// ── 8h. Lake polygon counts ───────────────────────────────────────
+// Checks the exported lake_polygons asset has a plausible number
+// of matched lake pairs (expected ~500–700 for Cordillera Blanca).
+A_lakePoly.size().evaluate(function(n) {
+  print('── 8h. Lake polygons (matched pairs, 2010–2021) ──');
+  print('Matched lake pairs:', n,
+    (n > 400 && n < 800)
+      ? '✓ PASS — plausible for Cordillera Blanca'
+      : '⚠ CHECK — outside expected 400–800 range');
+});
+// ════════════════════════════════════════════════════════════════
+// SECTION 9 — MAP VISUALISATION
+// Visual sense-check: turn on layers in the GEE Layers panel.
+// Expected patterns listed below each layer.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 9 — MAP VISUALISATION ════');
+print('Expected: Palcacocha basin orange/red on flood hazard');
+print('Expected: high drought basins in heavily glacierised headwaters');
+print('Expected: high impact basins overlap with valley settlements');
+
+Map.centerObject(STUDY_AREA, 10);
+Map.setOptions('TERRAIN');
+
+var riskPalette = ['#27AE60','#F1C40F','#E67E22','#C0392B'];
+
+Map.addLayer(
+  ee.Image().float().paint({featureCollection:masterRisk, color:'flood_hazard'}),
+  {min:0, max:90, palette:riskPalette, opacity:0.75},
+  'Flood hazard', false);
+Map.addLayer(
+  ee.Image().float().paint({featureCollection:masterRisk, color:'drought_hazard'}),
+  {min:0, max:100, palette:riskPalette, opacity:0.75},
+  'Drought hazard (GDBDI)', false);
+Map.addLayer(
+  ee.Image().float().paint({featureCollection:masterRisk, color:'flood_impact'}),
+  {min:0, max:100, palette:riskPalette, opacity:0.75},
+  'Flood impact', true);
+Map.addLayer(
+  ee.Image().float().paint({featureCollection:masterRisk, color:'drought_impact'}),
+  {min:0, max:100, palette:riskPalette, opacity:0.75},
+  'Drought impact', false);
+Map.addLayer(
+  ee.FeatureCollection([
+    ee.Feature(ee.Geometry.Point([-77.3743,-9.3897]), {name:'Palcacocha'}),
+    ee.Feature(ee.Geometry.Point([-77.5667,-9.2667]), {name:'Lake 513'}),
+    ee.Feature(ee.Geometry.Point([-77.4333,-9.7500]), {name:'Rajucolta'}),
+    ee.Feature(ee.Geometry.Point([-77.6333,-8.9833]), {name:'Artesoncocha'}),
+    ee.Feature(ee.Geometry.Point([-77.3833,-9.4167]), {name:'Llaca'})
+  ]), {color:'white'}, 'Known GLOF sites', true);
+Map.addLayer(
+  ee.Image().byte().paint({featureCollection:masterRisk, color:1, width:1}),
+  {palette:['black']}, 'Basin outlines', true);
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 10 — PALCACOCHA DEBUG
+// Palcacocha is the highest-priority GLOF site in the Cordillera
+// Blanca (1941 event, ~6000 fatalities). Its basin should score
+// VERY HIGH on flood hazard. This section diagnoses why if it
+// doesn't by printing all intermediate decision-tree inputs.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 10 — PALCACOCHA DEBUG ════');
+
+basins.filterBounds(ee.Geometry.Point([-77.3743, -9.3897])).first()
+  .evaluate(function(basin) {
+    var basinGeom  = ee.Feature(basin).geometry();
+    var basinLakes = A_lakePoly.filterBounds(basinGeom);
+
+    ee.Dictionary({
+      numLakes:     basinLakes.size(),
+      sla:          basinLakes.aggregate_mean('sla_deg'),
+      slopeMean:    slope.reduceRegion({
+        reducer:  ee.Reducer.mean(),
+        geometry: basinLakes.geometry().buffer(500),
+        scale:30, maxPixels:1e10
+      }).get('slope', 0),
+      slopeMax: slope.reduceRegion({
+        reducer:  ee.Reducer.max(),
+        geometry: basinLakes.geometry().buffer(500),
+        scale:30, maxPixels:1e10
+      }).get('slope', 0),
+      slopeBasin: slope.reduceRegion({
+        reducer:  ee.Reducer.mean(),
+        geometry: basinGeom,
+        scale:30, maxPixels:1e10
+      }).get('slope', 0)
+    }).evaluate(function(v) {
+      print('Lakes in Palcacocha basin:', v.numLakes);
+      print('SLA (mean sla_deg):', (v.sla || 0).toFixed(2) + '°  ' +
+        ((v.sla || 0) >= 10 ? '✓ self-destructive trigger active' : '— below 10° threshold'));
+      print('Mean slope near lake (500m):', (v.slopeMean || 0).toFixed(2) + '°');
+      print('Max slope near lake (500m):', (v.slopeMax || 0).toFixed(2) + '°  ' +
+        ((v.slopeMax || 0) > 45 ? '✓ dynamic failure trigger active' : '— below 45° threshold'));
+      print('Mean slope whole basin:', (v.slopeBasin || 0).toFixed(2) + '°');
+      print('Expected flood tier: VERY HIGH (both triggers should fire)');
+    });
+  });
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 11 — GDBDI VALIDATION
+// Validates the six fields added by the Glacial Dependent Basin
+// Drought Index (GDBDI) in Backend 2. Checks field completeness,
+// dimension spread, NDDI plausibility, guard logic, and WLC maths.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 11 — GDBDI VALIDATION ════');
+
+// ── 11a. Field completeness ───────────────────────────────────────
+ee.Dictionary({
+  glac_pct:      masterRisk.filter(ee.Filter.notNull(['glac_pct'])).size(),
+  loss_pct_10yr: masterRisk.filter(ee.Filter.notNull(['loss_pct_10yr'])).size(),
+  nddi_mean:     masterRisk.filter(ee.Filter.notNull(['nddi_mean'])).size(),
+  gdbdi_dim1:    masterRisk.filter(ee.Filter.notNull(['gdbdi_dim1'])).size(),
+  gdbdi_dim2:    masterRisk.filter(ee.Filter.notNull(['gdbdi_dim2'])).size(),
+  gdbdi_dim3:    masterRisk.filter(ee.Filter.notNull(['gdbdi_dim3'])).size(),
+  total:         masterRisk.size()
+}).evaluate(function(v) {
+  print('── 11a. GDBDI field completeness ──');
+  ['glac_pct','loss_pct_10yr','nddi_mean',
+   'gdbdi_dim1','gdbdi_dim2','gdbdi_dim3'].forEach(function(f) {
+    print(f + ': ' + v[f] + '/' + v.total +
+      (v[f] === v.total ? ' ✓ PASS' :
+       ' ✗ FAIL — null values, check reduceRegion in Backend 2'));
+  });
+});
+
+// ── 11b. Dimension score distributions ───────────────────────────
+// Each dimension should spread across the 1–5 scale.
+// If any dim is stuck at 1: thresholds are too high — recalibrate.
+// If any dim is stuck at 5: thresholds are too low — recalibrate.
+ee.Dictionary({
+  d1_min: masterRisk.aggregate_min('gdbdi_dim1'),
+  d1_max: masterRisk.aggregate_max('gdbdi_dim1'),
+  d1_mean:masterRisk.aggregate_mean('gdbdi_dim1'),
+  d2_min: masterRisk.aggregate_min('gdbdi_dim2'),
+  d2_max: masterRisk.aggregate_max('gdbdi_dim2'),
+  d2_mean:masterRisk.aggregate_mean('gdbdi_dim2'),
+  d3_min: masterRisk.aggregate_min('gdbdi_dim3'),
+  d3_max: masterRisk.aggregate_max('gdbdi_dim3'),
+  d3_mean:masterRisk.aggregate_mean('gdbdi_dim3')
+}).evaluate(function(v) {
+  print('── 11b. Dimension score distributions (scale: 1–5) ──');
+  print('Dim 1 (% glacier area):  min=' + v.d1_min + '  max=' + v.d1_max +
+        '  mean=' + v.d1_mean.toFixed(2) +
+        (v.d1_max > v.d1_min ? '  ✓ spread' : '  ⚠ no spread — recalibrate'));
+  print('Dim 2 (10-yr loss %):    min=' + v.d2_min + '  max=' + v.d2_max +
+        '  mean=' + v.d2_mean.toFixed(2) +
+        (v.d2_max > v.d2_min ? '  ✓ spread' : '  ⚠ no spread — recalibrate'));
+  print('Dim 3 (NDDI):            min=' + v.d3_min + '  max=' + v.d3_max +
+        '  mean=' + v.d3_mean.toFixed(2) +
+        (v.d3_max > v.d3_min ? '  ✓ spread' : '  ⚠ no spread — recalibrate'));
+});
+
+// ── 11c. NDDI range sanity ────────────────────────────────────────
+// nddi_mean should be positive and within a physically plausible range
+// for the 2000–3800m agricultural belt during the dry season.
+// Values ≤ 0 suggest S2 composite gaps (cloud/snow contamination).
+// Values > 10 suggest an outlier basin with no vegetation cover.
+ee.Dictionary({
+  nddi_min:   masterRisk.aggregate_min('nddi_mean'),
+  nddi_max:   masterRisk.aggregate_max('nddi_mean'),
+  nddi_mean:  masterRisk.aggregate_mean('nddi_mean'),
+  nddi_p10:   masterRisk.aggregate_array('nddi_mean').reduce(ee.Reducer.percentile([10])),
+  nddi_p90:   masterRisk.aggregate_array('nddi_mean').reduce(ee.Reducer.percentile([90])),
+  nddi_zeros: masterRisk.filter(ee.Filter.lte('nddi_mean', 0)).size()
+}).evaluate(function(v) {
+  print('── 11c. NDDI range sanity ──');
+  print('min=' + (v.nddi_min||0).toFixed(3) +
+        '  max=' + (v.nddi_max||0).toFixed(3) +
+        '  mean=' + (v.nddi_mean||0).toFixed(3) +
+        '  p10=' + (v.nddi_p10||0).toFixed(3) +
+        '  p90=' + (v.nddi_p90||0).toFixed(3));
+  print('Basins with NDDI ≤ 0:', v.nddi_zeros,
+    v.nddi_zeros === 0 ? '✓ PASS' :
+    '⚠ CHECK — widen S2 composite year range in Backend 2 (currently 2022–2024)');
+  print('NDDI min > 0.5:',
+    (v.nddi_min||0) > 0.5 ? '✓ PASS' :
+    '⚠ CHECK — very low values, confirm S2 coverage across all basins');
+  print('NDDI max < 10:',
+    (v.nddi_max||0) < 10 ? '✓ PASS' :
+    '⚠ CHECK — extreme outlier, likely a very small unvegetated basin');
+});
+
+// ── 11d. Guard check ─────────────────────────────────────────────
+// Basins with glacier area < 0.1 km² must have dim1 = 1 AND dim2 = 1.
+// Any higher score indicates the MIN_GLACIER_KM2 guard in Backend 2
+// failed to fire correctly.
+ee.Dictionary({
+  total_small: masterRisk.filter(ee.Filter.lt('glac2019_km2', 0.1)).size(),
+  dim1_fail:   masterRisk.filter(ee.Filter.lt('glac2019_km2', 0.1))
+                 .filter(ee.Filter.gt('gdbdi_dim1', 1)).size(),
+  dim2_fail:   masterRisk.filter(ee.Filter.lt('glac2019_km2', 0.1))
+                 .filter(ee.Filter.gt('gdbdi_dim2', 1)).size()
+}).evaluate(function(v) {
+  print('── 11d. Guard check (basins with glacier < 0.1 km²) ──');
+  print('Small-glacier basins:', v.total_small);
+  print('Dim1 = 1 for all:',
+    v.dim1_fail === 0 ? '✓ PASS' :
+    '✗ FAIL — ' + v.dim1_fail + ' basins, check MIN_GLACIER_KM2 guard in Backend 2');
+  print('Dim2 = 1 for all:',
+    v.dim2_fail === 0 ? '✓ PASS' :
+    '✗ FAIL — ' + v.dim2_fail + ' basins, check MIN_GLACIER_KM2 guard in Backend 2');
+});
+
+// ── 11e. WLC coherence spot-check ────────────────────────────────
+// Boundary conditions of the WLC rescaling formula:
+//   All dims = 5 → wlc = 5 → (5-1)/4 × 100 = 100
+//   All dims = 1 → wlc = 1 → (1-1)/4 × 100 = 0
+ee.Dictionary({
+  allFiveCount:   masterRisk.filter(ee.Filter.eq('gdbdi_dim1',5))
+                   .filter(ee.Filter.eq('gdbdi_dim2',5))
+                   .filter(ee.Filter.eq('gdbdi_dim3',5)).size(),
+  allFiveOK:      masterRisk.filter(ee.Filter.eq('gdbdi_dim1',5))
+                   .filter(ee.Filter.eq('gdbdi_dim2',5))
+                   .filter(ee.Filter.eq('gdbdi_dim3',5))
+                   .filter(ee.Filter.eq('drought_hazard',100)).size(),
+  allOneCount:    masterRisk.filter(ee.Filter.eq('gdbdi_dim1',1))
+                   .filter(ee.Filter.eq('gdbdi_dim2',1))
+                   .filter(ee.Filter.eq('gdbdi_dim3',1)).size(),
+  allOneOK:       masterRisk.filter(ee.Filter.eq('gdbdi_dim1',1))
+                   .filter(ee.Filter.eq('gdbdi_dim2',1))
+                   .filter(ee.Filter.eq('gdbdi_dim3',1))
+                   .filter(ee.Filter.eq('drought_hazard',0)).size()
+}).evaluate(function(v) {
+  print('── 11e. WLC coherence spot-check ──');
+  if (v.allFiveCount === 0) {
+    print('No basins with all dims = 5 ✓ (thresholds well-calibrated)');
+  } else {
+    print('Basins with all dims = 5 → drought_hazard = 100:',
+      v.allFiveOK === v.allFiveCount ? '✓ PASS' :
+      '✗ FAIL — WLC rescaling error in Backend 2');
+  }
+  if (v.allOneCount === 0) {
+    print('No basins with all dims = 1 ⚠ (unexpected — review thresholds)');
+  } else {
+    print('Basins with all dims = 1 → drought_hazard = 0:',
+      v.allOneOK === v.allOneCount ? '✓ PASS' :
+      '✗ FAIL — WLC rescaling error in Backend 2');
+  }
+});
+
+// ── 11f. Top 5 GDBDI basins — sense check ────────────────────────
+// Highest-scoring basins should be heavily glacierised headwater
+// catchments, not low-elevation valley or non-glacial basins.
+masterRisk.sort('drought_hazard', false).limit(5).evaluate(function(fc) {
+  print('── 11f. Top 5 basins by GDBDI drought hazard ──');
+  fc.features.forEach(function(f, i) {
+    var p = f.properties;
+    print((i+1) + '. HYBAS_ID=' + p.HYBAS_ID +
+          '  drought_hazard=' + p.drought_hazard +
+          '  dim1=' + p.gdbdi_dim1 +
+          '  dim2=' + p.gdbdi_dim2 +
+          '  dim3=' + p.gdbdi_dim3 +
+          '  glac_pct=' + (p.glac_pct||0).toFixed(1) + '%' +
+          '  loss_10yr=' + (p.loss_pct_10yr||0).toFixed(1) + '%' +
+          '  nddi=' + (p.nddi_mean||0).toFixed(2));
+  });
+  print('Expected: top basins are glacierised headwaters, not valley floors');
+});
+
+// ════════════════════════════════════════════════════════════════
+// SECTION 12 — GLACIER VALIDATION AGAINST RGI V7
+// Independent cross-validation of the NDSI glacier mapping against
+// the Randolph Glacier Inventory Version 7 (RGI Consortium 2023).
+// RGI V7 outlines are compiled from multi-temporal imagery (~2000s)
+// and represent the globally accepted reference for glacier extent.
+// Our 2019 mapped area is expected to be slightly smaller than RGI
+// because glaciers have continued to recede since the RGI acquisition
+// date — this direction of difference is physically correct.
+// ════════════════════════════════════════════════════════════════
+print('════ SECTION 12 — GLACIER VALIDATION (RGI V7) ════');
+
+var rgi = ee.FeatureCollection(
+  'projects/sat-io/open-datasets/RGI/RGI_VECTOR_MERGED_V7')
+  .filterBounds(STUDY_AREA);
+
+var rgiAreaKm2 = rgi.geometry().area(1).divide(1e6);
+
+var mapped2019Km2 = ee.Number(A_glac2019.multiply(ee.Image.pixelArea())
+  .reduceRegion({
+    reducer:   ee.Reducer.sum(),
+    geometry:  STUDY_AREA,
+    scale:     20, maxPixels:1e10, bestEffort:true
+  }).get('glacier', 0)).divide(1e6);
+
+var mapped2025Km2 = ee.Number(A_glac2025.multiply(ee.Image.pixelArea())
+  .reduceRegion({
+    reducer:   ee.Reducer.sum(),
+    geometry:  STUDY_AREA,
+    scale:     20, maxPixels:1e10, bestEffort:true
+  }).get('glacier', 0)).divide(1e6);
+
+ee.Dictionary({
+  rgi:      rgiAreaKm2,
+  map2019:  mapped2019Km2,
+  map2025:  mapped2025Km2,
+  rgiCount: rgi.size()
+}).evaluate(function(v) {
+  var rgiA    = v.rgi    || 0;
+  var m2019   = v.map2019|| 0;
+  var m2025   = v.map2025|| 0;
+  var diff    = m2019 - rgiA;
+  var diffPct = (diff / rgiA) * 100;
+  var loss    = m2025 - m2019;
+  var lossPct = (loss / m2019) * 100;
+  var annRate = lossPct / 6; // 2019–2025 = 6 years
+
+  print('── 12a. RGI V7 reference (study area) ──');
+  print('Glacier count:', v.rgiCount);
+  print('Total area:', rgiA.toFixed(2) + ' km²');
+
+  print('── 12b. NDSI-mapped extents (NDSI threshold = 0.35) ──');
+  print('Mapped 2019:', m2019.toFixed(2) + ' km²');
+  print('Mapped 2025:', m2025.toFixed(2) + ' km²');
+  print('Absolute loss 2019–2025:', loss.toFixed(2) + ' km²');
+  print('% loss:', lossPct.toFixed(1) + '%');
+  print('Annual recession rate:', annRate.toFixed(2) + '% yr⁻¹');
+
+  print('── 12c. Validation ──');
+  print('Difference (mapped 2019 − RGI):', diff.toFixed(2) +
+        ' km² (' + diffPct.toFixed(1) + '%)');
+  print('Direction correct (2019 < RGI):',
+    m2019 < rgiA
+      ? '✓ PASS — physically consistent with post-RGI recession'
+      : '⚠ CHECK — mapped 2019 exceeds RGI, review NDSI threshold');
+  print('Agreement within 5%:',
+    Math.abs(diffPct) < 5
+      ? '✓ PASS — strong agreement with independent reference'
+      : '⚠ CHECK — exceeds 5%, review cloud masking or threshold');
+
+  print('── 12d. NDSI threshold justification ──');
+  // Sensitivity analysis run on same bounding box confirms 0.35
+  // gives best agreement with RGI V7. Higher thresholds progressively
+  // underestimate glacier area by excluding transitional ice pixels.
+  print('Threshold 0.35 → 498.04 km² — adopted (closest to RGI)');
+  print('Threshold 0.40 → smaller area — underestimates marginal ice');
+  print('Threshold 0.50 → smallest area — significant underestimation');
+  print('Justification: 0.35 minimises RGI deviation (' +
+    Math.abs(diffPct).toFixed(1) + '%) and follows Paul et al. (2013)');
+
+  print('── 12e. Recession summary ──');
+  print('Net loss 2019–2025: ' + Math.abs(loss).toFixed(2) + ' km²' +
+        ' (' + Math.abs(lossPct).toFixed(1) + '%, ' +
+        Math.abs(annRate).toFixed(2) + '% yr⁻¹)');
+  print('Consistent with Andean trends (Rabatel et al. 2013):',
+    lossPct < 0 && Math.abs(annRate) < 3
+      ? '✓ PASS — within documented CB recession range'
+      : '⚠ CHECK — outside expected range, review composite quality');
+  print('MEAN_GLAC_LOSS_PCT used in Backend 2: 7.3%  ' +
+    (Math.abs(Math.abs(lossPct) - 7.3) < 0.5
+      ? '✓ consistent with mapped loss'
+      : '⚠ consider updating to ' + Math.abs(lossPct).toFixed(1) + '%'));
+});
+
+// ── 12f. Map visualisation ────────────────────────────────────────
+// Visual check: RGI outlines (red) should closely follow the 2019
+// glacier mask perimeter (white). Any large interior gaps indicate
+// possible underestimation from cloud cover or threshold effects.
+Map.addLayer(A_glac2019.selfMask(),
+  {palette:['ffffff'], opacity:0.6}, 'Glacier 2019 (white)', false);
+Map.addLayer(A_glac2025.selfMask(),
+  {palette:['00e5ff'], opacity:0.8}, 'Glacier 2025 (cyan)', false);
+Map.addLayer(rgi, {color:'red'}, 'RGI V7 outlines (red)', false);

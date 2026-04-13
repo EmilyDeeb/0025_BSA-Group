@@ -1,157 +1,133 @@
 // ════════════════════════════════════════════════════════════════
 // CORDILLERA BLANCA — RISK APP (FRONTEND)
 // CASA0025 Group Project
-// Emily · Santi · Nadia · Tabata
 // ════════════════════════════════════════════════════════════════
 
 // ── 1. ASSETS ────────────────────────────────────────────────────
-
-var PROJECT = 'users/jtparedes/';
-var A_lake1990   = ee.Image(PROJECT + 'lake_1990');
+var PROJECT   = 'projects/cordillera-blanca-risk-app/assets/';
+var A_lake2010   = ee.Image(PROJECT + 'lake_2010');
 var A_lake2021   = ee.Image(PROJECT + 'lake_2021');
 var A_lakeGrowth = ee.Image(PROJECT + 'lake_growth');
-var A_hazard     = ee.Image(PROJECT + 'hazard');
 var A_lakePoly   = ee.FeatureCollection(PROJECT + 'lake_polygons');
 var A_glac2019   = ee.Image(PROJECT + 'glacier_2019');
 var A_glac2025   = ee.Image(PROJECT + 'glacier_2025');
 var A_glacLoss   = ee.Image(PROJECT + 'glacier_loss');
 var A_cropland   = ee.Image(PROJECT + 'exposed_landcover');
-var A_bofedales  = ee.Image(PROJECT + 'bofedales');
-var A_agri       = ee.Image(PROJECT + 'agriculture');
+var A_agri       = ee.Image(PROJECT + 'agriculture').rename('exposed');
 var A_settl      = ee.Image(PROJECT + 'settlements_dw2024');
-var A_pop        = ee.Image(PROJECT + 'population_2020'); 
-var masterRisk   = ee.FeatureCollection(PROJECT + 'master_basin_risk'); 
+var A_pop        = ee.Image(PROJECT + 'population_2020');
+var masterRisk   = ee.FeatureCollection(PROJECT + 'master_basin_risk');
 
 // ── 2. CONSTANTS ─────────────────────────────────────────────────
-
-var STUDY_AREA   = ee.Geometry.Rectangle([-77.8, -10.0, -77.0, -8.5]);
-var PCT_CHANGE   = 9.9;
-var T_STATISTIC  = 6.682;
-var MEAN_LAKE_GROWTH_PCT = 30.9;  
-var MEAN_GLAC_LOSS_PCT   = 7.32;  
+var STUDY_AREA = ee.FeatureCollection(PROJECT + 'boundbox').first().geometry();
+var MEAN_LAKE_GROWTH_PCT = 16;
+var MEAN_GLAC_LOSS_PCT   = 7.4;
+var GLACIER_COLOR        = '#BB2649';
 
 // ── 3. BASE LAYERS ────────────────────────────────────────────────
-
-var dem   = ee.Image('USGS/SRTMGL1_003').clip(STUDY_AREA);
-var slope = ee.Terrain.slope(dem);
+var dem    = ee.Image('USGS/SRTMGL1_003').clip(STUDY_AREA);
 var basins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_12')
-  .filterBounds(STUDY_AREA);
-  
-// ── 4. LANGUAGE ───────────────────────────────────────────────────
+  .filterBounds(STUDY_AREA)
+  .map(function(basin) {
+    return basin.intersection(STUDY_AREA, ee.ErrorMargin(1));
+  });
 
+
+// ── 4. LANGUAGE ───────────────────────────────────────────────────
 var LANG = 'en';
 var T = {
   en: {
     title:        'Cordillera Blanca Risk App',
+    subtitle:     'Glacial flood & drought risk across 159 river basins\u2078 \u00b7 Peruvian Andes',
     langBtn:      'ES',
-    prompt:       'Click any basin on the map to begin',
-    loading:      'Computing basin statistics...',
-    outside:      'Please click within the study area',
+    step1:        '01.  Click to show overall risk across all basins',
     floodBtn:     'Show flood risk',
     droughtBtn:   'Show drought risk',
     resetBtn:     'Reset',
-    floodTitle:   'Flood Exposure',
-    droughtTitle: 'Drought Exposure',
-    radarTitle:   'Basin risk profile',
-    lakeHdr:      'Lake growth',
-    glacHdr:      'Glacier recession',
-    cropHdr:      'Land cover exposure',
-    settlHdr:     'Settlement density',
-    lakeArea:     'Lake area 2021',
-    lakeChg:      'Basin lake growth', // <-------------------------------------NEW
-    glacLoss:     'Loss 2019–2025',
-    glacDep:      'Glacier Dependence', // <-------------------------------------NEW
-    nddi:         'NDDI (Env. Stress)', // <-------------------------------------NEW
-    cropTotal:    'Total exposed cover',
-    cropAgri:     'Agriculture mosaic',
-    // settlRisk:    'Population at risk',
-    popTotal:     'Total population', // <-------------------------------------NEW
-    popExposed:   'Glacier-Dependent Pop.', // <-------------------------------------NEW
-    settlArea:    'Settlement area', // <-------------------------------------NEW
-    settlDens:    'Density of basin', 
-    elevated:     'Tier elevated (extreme climate stress)', // <-------------------------------------NEW
-    low:          'LOW',
-    medium:       'MEDIUM',
-    high:         'HIGH',
-    veryHigh:     'VERY HIGH'
+    step2:        '02.  Click any basin on the map to explore its statistics',
+    loading:      'Computing basin statistics...',
+    outside:      'Please click within the study area',
+    floodTitle:   'Flood Risk',
+    droughtTitle: 'Drought Risk',
+    floodEq:      'Flood Hazard\u00b9 = Slope & SLA + Lake growth rate + Glacier loss rate',
+    droughtEq:    'Drought Hazard\u2074 = % Glacier Area + 6-yr Loss + NDDI Anomaly  (GDBDI\u00b9\u2070)',
+    low:'LOW', medium:'MEDIUM', high:'HIGH', veryHigh:'VERY HIGH',
+    legendFlood:   'Basin flood risk distribution',
+    legendDrought: 'Basin drought risk distribution',
+    legendHow:     'How flood impact is calculated:',
+    legendHowD:    'How drought impact is calculated:',
+    legendImpact:  'Impact\u00b3 = Hazard\u00b9 \u00d7 Exposure\u00b2 / 100',
+    legendImpactD: 'Impact\u2076 = Hazard\u2074 \u00d7 Exposure\u2075 / 100',
+    legendHaz:     'Hazard\u00b9: decision tree \u2014 slope, SLA, lake growth, glacier loss',
+    legendHazD:    'Hazard\u2074: GDBDI \u2014 % glacier area + 6-yr loss + NDDI (WLC, equal weights)',
+    legendExp:     'Exposure\u00b2: total population + agriculture area (class 21)',
+    legendExpD:    'Exposure\u2075: total basin population + agriculture area (class 21)',
+    lakeHdr:       'Lake growth  2010\u20132021',
+    glacHdr:       'Glacier recession  2019\u20132025',
+    landHdr:       'Land cover exposure  2024',
+    settHdr:       'Settlements & population  2024',
+    fn1:  '\u00b9 Flood Hazard \u2014 Decision tree. Max slope within 500m of lake > 45\u00b0 (rockfall) or > 55\u00b0 (avalanche), calibrated across 159 basins. SLA \u2265 10\u00b0 flags moraine instability. Tier elevated if lake growth AND glacier loss both exceed study-wide averages (16% over 2010\u20132021 and 7.4%.',
+    fn2:  '\u00b2 Flood Exposure \u2014 Total basin population (WorldPop 2020) + agriculture mosaic area (MapBiomas 2024 class 21, 2000\u20133800m), each normalised to 0\u201350 and summed.',
+    fn3:  '\u00b3 Flood Impact \u2014 Flood Hazard\u00b9 \u00d7 Flood Exposure\u00b2 / 100.',
+    fn4:  '\u2074 Drought Hazard \u2014 Glacial Dependent Basin Drought Index (GDBDI): multi-criteria geospatial. Three equal-weight dimensions standardised 1\u20135 and integrated via Weighted Linear Combination (WLC), rescaled to 0\u2013100. Dim\u00a01: % glacier area (2019 extent / basin area) \u2014 glacial meltwater dependence. Dim\u00a02: 6-yr area loss % (2019\u20132025 NDSI extents) \u2014 rate of natural reservoir depletion. Dim\u00a03: mean NDDI from Sentinel-2 SR dry-season median 2022\u20132024 \u2014 immediate vegetation/moisture stress. Risk tiers: Low \u226425, Moderate 26\u201350, High 51\u201375, Very\u00a0High\u00a0>\u00a075.',
+    fn5:  '\u2075 Drought Exposure \u2014 Total basin population (WorldPop 2020) + agriculture mosaic area (MapBiomas 2024 class 21, 2000\u20133800m), each normalised to 0\u201350 and summed to give a 0\u2013100 score. Glacial water dependence is captured structurally through the GDBDI hazard dimensions rather than through a population mask.',
+    fn6:  '\u2076 Drought Impact \u2014 Drought Hazard\u2074 \u00d7 Drought Exposure\u2075 / 100.',
+    fn7:  '\u2077 Population exposure \u2014 Total population per basin from WorldPop (2020) at 100m resolution. Glacial water dependence is accounted for at the hazard level through the GDBDI (Dim\u00a01: % glacier area, Dim\u00a02: glacier loss rate) rather than through a land-cover population mask, which would misclassify populations in non-glaciated basins at the same elevation.',
+    fn8:  '\u2078 Basins \u2014 River catchment areas draining to the same outlet. HydroSHEDS level 12 (Lehner et al. 2008). 159 basins in the study area.',
+    fn9:  '\u2079 Affected cropland \u2014 All glacier-dependent land cover at 2000\u20133800m: MapBiomas Peru 2024 classes 21 (agriculture mosaic), 15 (managed pastures), 11 (bofedales), 12 (puna grasslands).',
+    fn10: '\u00b9\u2070 GDBDI \u2014 Basins with no meaningful glacier (\u2265 0.1 km\u00b2) or lake coverage receive dim1 = dim2 = 1 by design. Their drought score reflects vegetation/moisture stress (NDDI, Dim\u00a03) only and should be interpreted as indirect drought exposure, not structural glacial dependence. Such basins may still face water stress from upstream deglaciation affecting river flows.'
   },
   es: {
-    title:        'Cordillera Blanca - App de Riesgo',
+    title:        'App de Riesgo \u2014 Cordillera Blanca',
+    subtitle:     'Riesgo glaciar en 159 cuencas\u2078 \u00b7 Andes peruanos',
     langBtn:      'EN',
-    prompt:       'Haz clic en cualquier cuenca del mapa',
-    loading:      'Calculando estadísticas...',
-    outside:      'Haz clic dentro del área de estudio',
-    floodBtn:     'Ver riesgo de inundación',
-    droughtBtn:   'Ver riesgo de sequía',
+    step1:        '01.  Haz clic para ver el riesgo en todas las cuencas',
+    floodBtn:     'Ver riesgo de inundaci\u00f3n',
+    droughtBtn:   'Ver riesgo de sequ\u00eda',
     resetBtn:     'Restablecer',
-    floodTitle:   'Exposición a inundación',
-    droughtTitle: 'Exposición a sequías',
-    radarTitle:   'Perfil de riesgo de cuenca',
-    lakeHdr:      'Crecimiento de lagunas',
-    glacHdr:      'Retroceso glaciar',
-    cropHdr:      'Exposición de tierras',
-    settlHdr:     'Densidad de asentamientos',
-    lakeArea:     'Área de lagunas 2021',
-    lakeChg:      'Crecimiento de lagunas en cuenca', // <-------------------------------------NEW
-    glacLoss:     'Pérdida 2019–2025',
-    glacDep:      'Dependencia Glaciar', // <-------------------------------------NEW
-    nddi:         'NDDI (Estrés Amb.)', // <-------------------------------------NEW
-    cropTotal:    'Cobertura expuesta total',
-    cropAgri:     'Mosaico agrícola',
-    // settlRisk:    'Población en riesgo',
-    popTotal:     'Población total', // <-------------------------------------NEW
-    popExposed:   'Pob. Dependiente de Glaciar', // <-------------------------------------NEW
-    settlArea:    'Área de asentamientos', // <-------------------------------------NEW
-    settlDens:    'Densidad de la cuenca',
-    elevated:     'Nivel elevado (estrés climático extremo)', // <-------------------------------------NEW
-    low:          'BAJO',
-    medium:       'MEDIO',
-    high:         'ALTO',
-    veryHigh:     'MUY ALTO'
+    step2:        '02.  Haz clic en cualquier cuenca del mapa',
+    loading:      'Calculando estad\u00edsticas...',
+    outside:      'Haz clic dentro del \u00e1rea de estudio',
+    floodTitle:   'Riesgo de Inundaci\u00f3n',
+    droughtTitle: 'Riesgo de Sequ\u00eda',
+    floodEq:      'Peligro\u00b9 = Pendiente & SLA + Crecimiento lago + P\u00e9rdida glaciar',
+    droughtEq:    'Peligro\u2074 = % \u00c1rea glaciar + P\u00e9rdida 10 a\u00f1os + Anomal\u00eda NDDI  (GDBDI\u00b9\u2070)',
+    low:'BAJO', medium:'MEDIO', high:'ALTO', veryHigh:'MUY ALTO',
+    legendFlood:   'Distribuci\u00f3n de riesgo de inundaci\u00f3n',
+    legendDrought: 'Distribuci\u00f3n de riesgo de sequ\u00eda',
+    legendHow:     'C\u00f3mo se calcula el impacto:',
+    legendHowD:    'C\u00f3mo se calcula el impacto de sequ\u00eda:',
+    legendImpact:  'Impacto\u00b3 = Peligro\u00b9 \u00d7 Exposici\u00f3n\u00b2 / 100',
+    legendImpactD: 'Impacto\u2076 = Peligro\u2074 \u00d7 Exposici\u00f3n\u2075 / 100',
+    legendHaz:     'Peligro\u00b9: pendiente, SLA, lago, glaciar',
+    legendHazD:    'Peligro\u2074: GDBDI \u2014 % glaciar + p\u00e9rdida 10 a\u00f1os + NDDI (WLC, pesos iguales)',
+    legendExp:     'Exposici\u00f3n\u00b2: pob. total + \u00e1rea agr\u00edcola (clase 21)',
+    legendExpD:    'Exposici\u00f3n\u2075: poblaci\u00f3n total de cuenca + \u00e1rea agr\u00edcola (clase 21)',
+    lakeHdr:       'Crecimiento de lagunas  2010\u20132021',
+    glacHdr:       'Retroceso glaciar  2019\u20132025',
+    landHdr:       'Exposici\u00f3n de tierras  2024',
+    settHdr:       'Asentamientos y poblaci\u00f3n  2024',
+    fn1:  '\u00b9 Peligro inundaci\u00f3n \u2014 \u00c1rbol de decisi\u00f3n (Rounce et al. 2016). Pendiente m\u00e1x. > 45\u00b0 o > 55\u00b0 (Sattar et al. 2021). SLA \u2265 10\u00b0 (Fujita et al. 2013). Nivel elevado si crecimiento de laguna Y p\u00e9rdida glaciar superan promedios regionales (16% en 2010\u20132021 y 7.4%).',
+    fn2:  '\u00b2 Exposici\u00f3n inundaci\u00f3n \u2014 Poblaci\u00f3n total + \u00e1rea mosaico agr\u00edcola clase 21 (MapBiomas 2024, 2000\u20133800m).',
+    fn3:  '\u00b3 Impacto inundaci\u00f3n \u2014 Peligro\u00b9 \u00d7 Exposici\u00f3n\u00b2 / 100.',
+    fn4:  '\u2074 Peligro sequ\u00eda \u2014 \u00cdndice de Sequ\u00eda de Cuenca Dependiente de Glaciares (GDBDI): marco geoespacial multicriterio basado en Hoque et al. (2020) y la teor\u00eda de Agua M\u00e1xima de Baraer et al. (2012). Tres dimensiones estandarizadas 1\u20135 integradas mediante Combinaci\u00f3n Lineal Ponderada (WLC) con pesos iguales, reescaladas a 0\u2013100. Dim\u00a01: % \u00e1rea glaciar (2019) \u2014 dependencia del deshielo (Ultee et al. 2022). Dim\u00a02: p\u00e9rdida glaciar 2019\u20132025 % \u2014 tasa de agotamiento del reservorio natural (Baraer et al. 2012). Dim\u00a03: NDDI medio (Gu et al. 2007) de Sentinel-2 SR temporada seca 2022\u20132024 \u2014 estr\u00e9s h\u00eddrico inmediato. Niveles: Bajo \u226425, Moderado 26\u201350, Alto 51\u201375, Muy\u00a0Alto\u00a0>\u00a075.',
+    fn5:  '\u2075 Exposici\u00f3n sequ\u00eda \u2014 Poblaci\u00f3n total de la cuenca (WorldPop 2020) + \u00e1rea mosaico agr\u00edcola (MapBiomas 2024 clase 21, 2000\u20133800m), cada una normalizada a 0\u201350 y sumadas para un puntaje 0\u2013100. La dependencia del agua glaciar se captura estructuralmente mediante las dimensiones de peligro GDBDI.',
+    fn6:  '\u2076 Impacto sequ\u00eda \u2014 Peligro\u2074 \u00d7 Exposici\u00f3n\u2075 / 100.',
+    fn7:  '\u2077 Exposici\u00f3n poblacional \u2014 Poblaci\u00f3n total por cuenca de WorldPop (2020) a 100m. La dependencia del agua glaciar se considera a nivel de peligro mediante el GDBDI (Dim\u00a01: % \u00e1rea glaciar, Dim\u00a02: tasa de p\u00e9rdida), en lugar de una m\u00e1scara de cobertura terrestre que clasificar\u00eda err\u00f3neamente poblaciones en cuencas no glaciadas a la misma elevaci\u00f3n.',
+    fn8:  '\u2078 Cuencas \u2014 HydroSHEDS nivel 12. 159 cuencas en el \u00e1rea de estudio.',
+    fn9:  '\u2079 Cultivos afectados \u2014 MapBiomas Per\u00fa 2024 clases 21, 15, 11, 12 entre 2000\u20133800m.',
+    fn10: '\u00b9\u2070 GDBDI \u2014 Cuencas sin cobertura glaciar significativa (\u2265 0.1 km\u00b2) reciben dim1 = dim2 = 1 por dise\u00f1o. Su puntaje de sequ\u00eda refleja solo el estr\u00e9s de vegetaci\u00f3n/humedad (NDDI, Dim\u00a03) y debe interpretarse como exposici\u00f3n indirecta, no dependencia glaciar estructural.'
   }
 };
 function tr(k) { return T[LANG][k]; }
 
-// ── 5. RISK SCORES ────────────────────────────────────────────────
-
-function computeFloodHazard(lakeKm2, lake1990Km2, glacLossKm2, glac2019Km2, slopeDeg, slaDeg) {
-  var dynamicFailure = (slopeDeg > 30) || (slopeDeg > 45);
-  var selfDestructive = slaDeg >= 10;
-  var baseScore;
-  if      (dynamicFailure && selfDestructive)  { baseScore = 90; } 
-  else if (dynamicFailure && !selfDestructive) { baseScore = 65; } 
-  else if (!dynamicFailure && selfDestructive) { baseScore = 45; } 
-  else                                         { baseScore = 20; } 
-
-  var basinLakeGrowthPct = lake1990Km2 > 0 ? ((lakeKm2 - lake1990Km2) / lake1990Km2 * 100) : 0;
-  var basinGlacLossPct = glac2019Km2 > 0 ? (glacLossKm2 / glac2019Km2 * 100) : 0;
-
-  if (basinLakeGrowthPct > MEAN_LAKE_GROWTH_PCT && basinGlacLossPct > MEAN_GLAC_LOSS_PCT) {
-    baseScore = Math.min(baseScore + 25, 90);
-  }
-  return { score: Math.round(baseScore) };
-}
-
-function computeDroughtHazard(glacPct, lossPct, nddi) {
-  var s1 = (glacPct < 0.5) ? 5 : (glacPct < 2) ? 4 : (glacPct < 5) ? 3 : (glacPct < 10) ? 2 : 1;
-  var s2 = (lossPct > 15) ? 5 : (lossPct > 10) ? 4 : (lossPct > 5) ? 3 : (lossPct > 2) ? 2 : 1;
-  var s3 = (nddi > 0.5) ? 5 : (nddi > 0.3) ? 4 : (nddi > 0.15) ? 3 : (nddi > 0.05) ? 2 : 1;
-  var avgScore = (s1 + s2 + s3) / 3;
-  return {
-    score: Math.round((avgScore / 5) * 100),
-    radarDep: (s1 / 5) * 100,
-    radarLoss: (s2 / 5) * 100,
-    radarNddi: (s3 / 5) * 100
-  };
-}
-
+// ── 5. HELPERS ────────────────────────────────────────────────────
 function riskLevel(score) {
   if (score > 65) return tr('veryHigh');
   if (score > 45) return tr('high');
   if (score > 25) return tr('medium');
   return tr('low');
 }
-
 function riskColor(score) {
   if (score > 65) return '#C0392B';
   if (score > 45) return '#E67E22';
@@ -159,407 +135,807 @@ function riskColor(score) {
   return '#27AE60';
 }
 
-// ── 6. IU SET UP ─────────────────────────────────────────────────
-
-// Basemap
-
+// ── 6. MAP SETUP ──────────────────────────────────────────────────
 var mainMap = ui.Map();
-mainMap.setCenter(-77.4, -9.2, 10);
+mainMap.setCenter(-77.4, -9.2, 8.4);
 
-var roadNetwork = [
-  {stylers: [{saturation: -100}]}];
-
-mainMap.setOptions('roadNetwork', {roadNetwork: roadNetwork});
-
-mainMap.setControlVisibility({
-  zoomControl:       true,
-  mapTypeControl:    false,
-  scaleControl:      false,
-  fullscreenControl: false
+mainMap.setOptions('cb_basemap', {
+  cb_basemap: [
+    {featureType:'all', stylers:[{saturation:-100},{gamma:0.9}]}
+  ]
 });
 
-// Helpers
+mainMap.setControlVisibility({
+  zoomControl:true, mapTypeControl:false,
+  scaleControl:false, fullscreenControl:false
+});
 
-function statRow(label, value, valueColor) {
-  valueColor = valueColor || '#222';
+// ── 7. COLOURS ────────────────────────────────────────────────────
+var C = {
+  navy:  '#00274F',
+  grey:  '#4a4a4a',
+  lgrey: '#777777',
+  bg:    '#ffffff',
+  panel: '#f5f5f5',
+  div:   '#e0ddd5',
+  white: 'white'
+};
+
+// ── 8. UI HELPERS ─────────────────────────────────────────────────
+function statCell(label, value, valueColor) {
   return ui.Panel([
-      ui.Label(label, {
-        fontSize:'10px', color:'#777', margin:'2px 0px',
-        textAlign:'center', stretch:'horizontal'}),
-      ui.Label(value, {
-        fontSize:'10px', fontWeight:'bold', color:valueColor, margin:'2px 0px',
-        textAlign:'center', stretch:'horizontal'})],
-    ui.Panel.Layout.flow('vertical'),{
-      margin:'0px', stretch:'horizontal'});}
+    ui.Label(label, {
+      fontSize:'9px', color:C.lgrey,
+      margin:'2px 4px 0px 4px', textAlign:'left'
+    }),
+    ui.Label(value, {
+      fontSize:'11px', fontWeight:'bold',
+      color: valueColor || C.navy,
+      margin:'0px 4px 4px 4px', textAlign:'left'
+    })
+  ], ui.Panel.Layout.flow('vertical'), {
+    stretch:'horizontal', margin:'1px',
+    backgroundColor:C.panel, padding:'2px'
+  });
+}
 
-function sectionHeader(text, color) {
+function twoCol(a, b) {
+  return ui.Panel([a, b],
+    ui.Panel.Layout.flow('horizontal'),
+    {stretch:'horizontal', margin:'2px 0px'}
+  );
+}
+
+function quadHdr(text, color) {
   return ui.Label(text, {
-    fontSize:'10px', fontWeight:'bold', color:'white', backgroundColor:color,
-    margin:'4px 0px 0px 0px', padding:'4px 12px'});}
+    fontSize:'9px', fontWeight:'bold', color:C.white,
+    backgroundColor:color,
+    margin:'6px 0px 0px 0px', padding:'3px 8px'
+  });
+}
 
-function assetSection(header, body) {
-  var headerRow = ui.Panel([
-    ui.Panel([], null, {stretch:'horizontal'}), header,
-    ui.Panel([], null, {stretch:'horizontal'})], 
-    ui.Panel.Layout.flow('horizontal'), {stretch:'horizontal',margin:'0px'});
-  var bodyRow = ui.Panel([
-    ui.Panel([], null, {stretch:'horizontal'}),body,
-    ui.Panel([], null, {stretch:'horizontal'})], 
-    ui.Panel.Layout.flow('horizontal'), {stretch:'horizontal',margin:'0px'});
-  return ui.Panel([headerRow, bodyRow],
-    ui.Panel.Layout.flow('vertical'), {stretch:'horizontal', margin:'0px'});}
+function divLine() {
+  return ui.Label('', {
+    backgroundColor:C.div, margin:'6px 12px', padding:'0.5px 0px'
+  });
+}
 
+// ── 9. BUILD PANEL ────────────────────────────────────────────────
 var panel = ui.Panel({
-  style: {width: '450px', padding: '0px', backgroundColor: 'white', stretch: 'vertical'}});
-
-// Header
-
-var titleLbl = ui.Label('', {
-  fontSize:'25px', fontWeight:'bold', color:'black', margin:'20px 0px 12px 12px',
-  textAlign: 'center', stretch: 'horizontal'});
-
-var subtitleLbl = ui.Label('', {
-  fontSize:'18px', color:'black', margin:'-15px 20px 6px 12px',
-  textAlign: 'center', stretch: 'horizontal'});
+  style:{width:'460px', padding:'0px',
+         backgroundColor:C.bg, stretch:'vertical'}
+});
 
 var langBtn = ui.Button({
-  label:'ES',
-  style:{margin:'0px', padding:'2px 8px', fontSize:'9px', backgroundColor:'white', color:'#333', border:'0px'},
+  label: 'ES',
+  style: {
+    margin: '0px 8px 0px 0px', padding: '2px 8px',
+    fontSize: '9px', color: C.navy
+  },
   onClick: function() {
-    LANG = LANG === 'en' ? 'es' : 'en'; langBtn.setLabel(tr('langBtn')); refreshText();}});
+    LANG = LANG === 'en' ? 'es' : 'en';
+    langBtn.setLabel(tr('langBtn'));
+    refreshText();
+  }
+});
 
-var headerPanel = ui.Panel([titleLbl, subtitleLbl], ui.Panel.Layout.flow('vertical'), {
-  margin:'0px', stretch:'horizontal'});
+var titleLbl = ui.Label('Cordillera Blanca Risk App', {
+  fontSize: '18px',
+  fontWeight: 'bold',
+  color: C.navy,
+  margin: '0px',
+  textAlign: 'left',
+  stretch: 'horizontal',
+  backgroundColor: '#dce8f5'
+});
 
-var langPanel = ui.Panel([langBtn], null, {
-  position: 'top-right', padding: '6px', backgroundColor: 'ffffff00'});
+var titleBar = ui.Panel(
+  [titleLbl, langBtn],
+  ui.Panel.Layout.flow('horizontal'),
+  {
+    backgroundColor: '#dce8f5',
+    margin: '0px',
+    padding: '12px',
+    stretch: 'horizontal'
+  }
+);
 
-var promptLbl = ui.Label('', {
-  fontSize:'12px', color:'#666', fontStyle:'italic', margin:'8px 12px 4px 12px',
-  textAlign: 'center', stretch: 'horizontal'});
+var subtitleLbl = ui.Label('', {
+  fontSize:'9px', color:C.lgrey,
+  margin:'4px 12px 8px 12px',
+  textAlign:'center', stretch:'horizontal'
+});
 
-// Flood Box settings
-
-var floodTitleLbl = ui.Label('', {
-  fontSize:'12px', fontWeight:'bold', color:'#00274F', margin:'5px',
-  textAlign: 'center', stretch: 'horizontal'});
-
-var floodLevelLbl = ui.Label('—', {
-  fontSize:'18px', fontWeight:'bold', color:'#00274F', margin:'0',
-  textAlign: 'center', stretch: 'horizontal'});
-
-var floodScoreLbl = ui.Label('', {
-  fontSize:'12px', color:'#00274F', margin:'0px',
-  textAlign: 'center', stretch: 'horizontal'});
-  
-var floodElevLbl = ui.Label('', {
-  fontSize:'8px', color:'#7c3aed', margin:'0px',
-  textAlign: 'center', stretch: 'horizontal'});
-
-var floodBox = ui.Panel(
-  [floodTitleLbl, floodLevelLbl, floodScoreLbl],
-  ui.Panel.Layout.flow('vertical'), {margin:'4px 2px 4px 8px'});
-  
-// Drought Box settings
-
-var droughtTitleLbl = ui.Label('', {
-  fontSize:'12px', fontWeight:'bold', color:'#00274F', margin:'5px',
-  textAlign: 'center', stretch: 'horizontal'});
-
-var droughtLevelLbl = ui.Label('—', {
-  fontSize:'18px', fontWeight:'bold', color:'#00274F', margin:'0px',
-  textAlign: 'center', stretch: 'horizontal'});
-
-var droughtScoreLbl = ui.Label('', {
-  fontSize:'12px', color:'#00274F', margin:'0px',
-  textAlign: 'center', stretch: 'horizontal'});
-
-var droughtBox = ui.Panel(
-  [droughtTitleLbl, droughtLevelLbl, droughtScoreLbl],
-  ui.Panel.Layout.flow('vertical'), {margin:'4px 8px 4px 2px'});
-  
-// Boxes buttons settings
+// Step 1
+var step1Lbl = ui.Label('', {
+  fontSize:'11px', fontWeight:'bold', color:C.navy,
+  margin:'8px 12px 4px 12px'
+});
 
 var floodBtn = ui.Button({
-  label: '', style: {margin:'4px 2px 4px 8px', fontSize:'9px', color:'#00274F'}, 
-  onClick: function() {showRiskMap('flood'); }});
-
+  label:'',
+  style:{margin:'4px 4px 4px 12px', padding:'5px 10px',
+         fontSize:'10px', color:'#023E8A'},
+  onClick:function() { showRiskMap('flood'); }
+});
 var droughtBtn = ui.Button({
-  label: '', style: {margin:'4px 2px 4px 2px', fontSize:'9px', color:'#00274F'},
-  onClick: function() {showRiskMap('drought'); }});
-
+  label:'',
+  style:{margin:'4px 4px 4px 4px', padding:'5px 10px',
+         fontSize:'10px', color:'#CC5500'},
+  onClick:function() { showRiskMap('drought'); }
+});
 var resetBtn = ui.Button({
-  label: '', style: {margin:'4px 8px 4px 2px', fontSize:'9px'},
-  onClick: function() {mainMap.setCenter(-77.4, -9.2, 10); resetUI(); }});
-
-var riskBoxesInner = ui.Panel(
-  [floodBox, droughtBox],
-  ui.Panel.Layout.flow('horizontal'), {margin:'0px'});
-
-var riskBoxRow = ui.Panel([
-  ui.Panel(null, null, {stretch:'horizontal'}), riskBoxesInner,
-  ui.Panel(null, null, {stretch:'horizontal'})],
-  ui.Panel.Layout.flow('horizontal'), {margin:'0px', stretch:'horizontal'});
-
-var btnInner = ui.Panel(
-  [floodBtn, droughtBtn, resetBtn],
-  ui.Panel.Layout.flow('horizontal'), {margin:'0px', padding:'0px 0px 10px 0px'});
-
+  label:'',
+  style:{margin:'4px 12px 4px 4px', padding:'5px 10px', fontSize:'10px'},
+  onClick:function() { mainMap.setCenter(-77.4,-9.2,8.4); resetUI(); }
+});
 var btnRow = ui.Panel([
-  ui.Panel(null, null, {stretch:'horizontal'}), btnInner,
-  ui.Panel(null, null, {stretch:'horizontal'})],
-  ui.Panel.Layout.flow('horizontal'), {margin:'0px', stretch:'horizontal'});
+  ui.Panel(null,null,{stretch:'horizontal'}),
+  ui.Panel([floodBtn,droughtBtn,resetBtn],
+    ui.Panel.Layout.flow('horizontal'),{margin:'0px'}),
+  ui.Panel(null,null,{stretch:'horizontal'})
+],ui.Panel.Layout.flow('horizontal'),
+  {margin:'0px',stretch:'horizontal'}
+);
 
-// Stat sections
+// Sidebar legend
+var legendPanel = ui.Panel({
+  style:{margin:'4px 12px', padding:'8px',
+         backgroundColor:C.panel, border:'1px solid #ddd', shown:false}
+});
+var legendTitleLbl  = ui.Label('',{fontSize:'10px',fontWeight:'bold',color:C.navy,margin:'0px 0px 4px 0px',backgroundColor:C.panel});
+var legendHowLbl    = ui.Label('',{fontSize:'9px',color:C.grey,fontStyle:'italic',margin:'4px 0px 2px 0px',backgroundColor:C.panel});
+var legendImpactLbl = ui.Label('',{fontSize:'9px',color:C.grey,margin:'1px 0px 1px 8px',backgroundColor:C.panel});
+var legendHazLbl    = ui.Label('',{fontSize:'9px',color:C.grey,margin:'1px 0px 1px 8px',backgroundColor:C.panel});
+var legendExpLbl    = ui.Label('',{fontSize:'9px',color:C.grey,margin:'1px 0px 6px 8px',backgroundColor:C.panel});
+var legendLow       = ui.Label('',{fontSize:'9px',color:'#27AE60',margin:'1px 0px',backgroundColor:C.panel});
+var legendMed       = ui.Label('',{fontSize:'9px',color:'#DAA520',margin:'1px 0px',backgroundColor:C.panel});
+var legendHigh      = ui.Label('',{fontSize:'9px',color:'#E67E22',margin:'1px 0px',backgroundColor:C.panel});
+var legendVH        = ui.Label('',{fontSize:'9px',color:'#C0392B',margin:'1px 0px',backgroundColor:C.panel});
 
-var emilyHdr   = sectionHeader('', '#3182bd');
-var emilyBody  = ui.Panel({style:{margin:'0px 0px 2px 0px'}});
-var santiHdr   = sectionHeader('', '#0000FF');
-var santiBody  = ui.Panel({style:{margin:'0px 0px 2px 0px'}});
-var nadiaHdr   = sectionHeader('', '#588157');
-var nadiaBody  = ui.Panel({style:{margin:'0px 0px 2px 0px'}});
-var tabataHdr  = sectionHeader('', '#713600');
-var tabataBody = ui.Panel({style:{margin:'0px 0px 2px 0px'}});
+[legendTitleLbl,legendHowLbl,legendImpactLbl,legendHazLbl,
+ legendExpLbl,legendLow,legendMed,legendHigh,legendVH
+].forEach(function(w){legendPanel.add(w);});
 
-var divider = ui.Label('', {
-  backgroundColor:'#e0ddd5', margin:'6px 12px', padding:'0.5px 0px'});
+// Step 2
+var step2Lbl = ui.Label('',{
+  fontSize:'11px',fontWeight:'bold',color:C.navy,
+  margin:'8px 12px 2px 12px'
+});
+var promptLbl = ui.Label('',{
+  fontSize:'9px',color:C.lgrey,fontStyle:'italic',
+  margin:'0px 12px 4px 12px',
+  textAlign:'center',stretch:'horizontal'
+});
 
-var radarTitleLbl = ui.Label('', {
-  fontSize:'10px', fontWeight:'bold', color:'#444', margin:'6px 0px 2px 12px'});
-  
-var radarPanel = ui.Panel({
-  style:{margin:'0px 8px 8px 8px', padding:'0px'}});
+// Risk boxes
+var floodTitleLbl = ui.Label('',{
+  fontSize:'11px',fontWeight:'bold',color:'#023E8A',
+  margin:'4px 4px 2px 4px',
+  textAlign:'center',stretch:'horizontal'
+});
+var floodEqLbl = ui.Label('',{
+  fontSize:'8px',color:'#728FCE',
+  margin:'0px 6px 4px 6px',
+  textAlign:'center',stretch:'horizontal'
+});
+var floodLevelLbl = ui.Label('\u2014',{
+  fontSize:'22px',fontWeight:'bold',color:C.navy,
+  margin:'2px',textAlign:'center',stretch:'horizontal'
+});
+var floodScoreLbl = ui.Label('',{
+  fontSize:'9px',color:C.grey,
+  margin:'0px 4px 2px 4px',
+  textAlign:'center',stretch:'horizontal'
+});
+var floodElevLbl = ui.Label('',{
+  fontSize:'8px',color:'#7c3aed',
+  margin:'0px 4px 4px 4px',
+  textAlign:'center',stretch:'horizontal'
+});
+var floodBox = ui.Panel(
+  [floodTitleLbl,floodEqLbl,floodLevelLbl,floodScoreLbl,floodElevLbl],
+  ui.Panel.Layout.flow('vertical'),
+  {margin:'4px 2px 4px 8px',padding:'6px',
+   border:'1px solid #023E8A',
+   backgroundColor:C.bg,stretch:'horizontal'}
+);
 
-var methodBox = ui.Panel({
-  style: {margin: '6px 12px', padding: '6px', backgroundColor: '#f9f9f9', border: '1px solid #eee'}});
-  
-var methodTitle = ui.Label('', {
-  fontSize:'9px', fontWeight:'bold', color:'#333', margin:'0px'});
+var droughtTitleLbl = ui.Label('',{
+  fontSize:'11px',fontWeight:'bold',color:'#CC5500',
+  margin:'4px 4px 2px 4px',
+  textAlign:'center',stretch:'horizontal'
+});
+var droughtEqLbl = ui.Label('',{
+  fontSize:'8px',color:'#E89149',
+  margin:'0px 6px 4px 6px',
+  textAlign:'center',stretch:'horizontal'
+});
+var droughtLevelLbl = ui.Label('\u2014',{
+  fontSize:'22px',fontWeight:'bold',color:'#E89149',
+  margin:'2px',textAlign:'center',stretch:'horizontal'
+});
+var droughtScoreLbl = ui.Label('',{
+  fontSize:'9px',color:C.grey,
+  margin:'0px 4px 4px 4px',
+  textAlign:'center',stretch:'horizontal'
+});
+// Notice shown for non-glaciated basins — GDBDI score reflects NDDI only
+var droughtNoticeLbl = ui.Label('',{
+  fontSize:'8px', color:'#CC5500', fontStyle:'italic',
+  margin:'0px 6px 4px 6px',
+  textAlign:'center', stretch:'horizontal', shown:false
+});
+var droughtBox = ui.Panel(
+  [droughtTitleLbl,droughtEqLbl,droughtLevelLbl,droughtScoreLbl,droughtNoticeLbl],
+  ui.Panel.Layout.flow('vertical'),
+  {margin:'4px 8px 4px 2px',padding:'6px',
+   border:'1px solid #CC5500',
+   backgroundColor:C.bg,stretch:'horizontal'}
+);
 
-var methodText = ui.Label('', {
-  fontSize:'8px', color:'#555', whiteSpace:'pre-wrap', margin:'2px 0px'});
-  
-methodBox.add(methodTitle).add(methodText);
+var riskBoxRow = ui.Panel([floodBox,droughtBox],
+  ui.Panel.Layout.flow('horizontal'),
+  {margin:'4px 0px',stretch:'horizontal'}
+);
+
+// Stat grid
+var lakeHdr  = quadHdr('','#3182bd');
+var lakeBody = ui.Panel({style:{margin:'0px'}});
+
+var glacHdr  = quadHdr('',GLACIER_COLOR);
+var glacBody = ui.Panel({style:{margin:'0px'}});
+
+var landHdr  = quadHdr('','#588157');
+var landBody = ui.Panel({style:{margin:'0px'}});
+var settHdr  = quadHdr('','#713600');
+var settBody = ui.Panel({style:{margin:'0px'}});
+
+var leftCol = ui.Panel(
+  [lakeHdr,lakeBody,landHdr,landBody],
+  ui.Panel.Layout.flow('vertical'),
+  {stretch:'horizontal',margin:'0px 2px 0px 8px'}
+);
+var rightCol = ui.Panel(
+  [glacHdr,glacBody,settHdr,settBody],
+  ui.Panel.Layout.flow('vertical'),
+  {stretch:'horizontal',margin:'0px 8px 0px 2px'}
+);
+var statsGrid = ui.Panel([leftCol,rightCol],
+  ui.Panel.Layout.flow('horizontal'),
+  {stretch:'horizontal',margin:'4px 0px'}
+);
+
+// Report button
+var reportBtn = ui.Button({
+  label:'Generate Basin Report',
+  style:{
+    margin:'4px 12px 2px 12px',padding:'5px 10px',
+    fontSize:'10px',color:'#3D5941',stretch:'horizontal',
+    shown:false
+  },
+  onClick:function(){generateReport();}
+});
+
+
+// Footnotes
+var footBox = ui.Panel({
+  style:{margin:'4px 12px 12px 12px',padding:'8px',
+         backgroundColor:C.panel,border:'1px solid #eee'}
+});
+footBox.add(ui.Label('Notes',{
+  fontSize:'9px',fontWeight:'bold',color:C.navy,
+  margin:'0px 0px 4px 0px'
+}));
+var fnKeys = ['fn1','fn2','fn3','fn4','fn5','fn6','fn7','fn8','fn9','fn10'];
+var fnLabels = fnKeys.map(function(k){
+  var lbl = ui.Label('',{
+    fontSize:'8px', color:C.grey,
+    margin:'2px 0px', whiteSpace:'pre-wrap',
+    backgroundColor: C.panel
+  });
+  footBox.add(lbl);
+  return lbl;
+});
 
 // Assemble panel
-
-panel.add(headerPanel);
+panel.add(titleBar);
+panel.add(subtitleLbl);
+panel.add(divLine());
+panel.add(step1Lbl);
+panel.add(btnRow);
+panel.add(legendPanel);
+panel.add(divLine());
+panel.add(step2Lbl);
 panel.add(promptLbl);
 panel.add(riskBoxRow);
-panel.add(btnRow);
-panel.add(assetSection(emilyHdr, emilyBody));
-panel.add(assetSection(santiHdr, santiBody));
-panel.add(assetSection(nadiaHdr, nadiaBody));
-panel.add(assetSection(tabataHdr, tabataBody));
-panel.add(divider);
-panel.add(radarTitleLbl);
-panel.add(radarPanel);
-panel.add(methodBox);
-panel.add(langPanel);
+panel.add(statsGrid);
+panel.add(reportBtn);
+panel.add(divLine());
+panel.add(footBox);
 
-// Reset ui.root widgets safely with our custom mainMap
-
-ui.root.widgets().reset([panel, mainMap]);
+ui.root.widgets().reset([panel,mainMap]);
 ui.root.setLayout(ui.Panel.Layout.flow('horizontal'));
 
-// ── 7. LOGIC ─────────────────────────────────────────────────────
+// ── Floating map legend ───────────────────────────────────────────
+var mapLegend = ui.Panel({
+  style:{
+    position:'bottom-left',padding:'8px 10px',
+    backgroundColor:'rgba(255,255,255,0.92)'
+  }
+});
+mapLegend.add(ui.Label('Impact Score  (0\u2013100)',{
+  fontSize:'10px',fontWeight:'bold',color:C.navy,
+  margin:'0px 0px 4px 0px'
+}));
+mapLegend.add(ui.Panel([
+  ui.Label('\u25a0',{fontSize:'16px',color:'#27AE60',margin:'0px 2px 0px 0px'}),
+  ui.Label('\u25a0',{fontSize:'16px',color:'#F1C40F',margin:'0px 2px'}),
+  ui.Label('\u25a0',{fontSize:'16px',color:'#E67E22',margin:'0px 2px'}),
+  ui.Label('\u25a0',{fontSize:'16px',color:'#C0392B',margin:'0px 2px'})
+],ui.Panel.Layout.flow('horizontal'),{margin:'0px 0px 1px 0px'}));
+mapLegend.add(ui.Panel([
+  ui.Label('LOW',  {fontSize:'7px',color:C.lgrey,margin:'0px 4px 0px 0px'}),
+  ui.Label('MED',  {fontSize:'7px',color:C.lgrey,margin:'0px 8px 0px 0px'}),
+  ui.Label('HIGH', {fontSize:'7px',color:C.lgrey,margin:'0px 4px 0px 0px'}),
+  ui.Label('V.HIGH',{fontSize:'7px',color:C.lgrey,margin:'0px 0px'})
+],ui.Panel.Layout.flow('horizontal'),{margin:'0px 0px 6px 0px'}));
 
+function legendEntry(color, label) {
+  return ui.Panel([
+    ui.Label('\u25a0',{fontSize:'14px',color:color,margin:'0px 4px 0px 0px'}),
+    ui.Label(label,  {fontSize:'8px', color:C.grey,margin:'2px 0px'})
+  ],ui.Panel.Layout.flow('horizontal'),{margin:'1px 0px'});
+}
+mapLegend.add(legendEntry(GLACIER_COLOR,'Confirmed Glacier Loss 2019\u20132025'));
+mapLegend.add(legendEntry('#588157',    'Exposed land cover (all classes)'));
+mapLegend.add(legendEntry('#a8c26e',    'Agriculture mosaic (class 21 only)'));
+mapLegend.add(legendEntry('#00FFFF',    'Lake growth %'));
+mapLegend.add(legendEntry('#713600',    'Settlements'));
+mainMap.add(mapLegend);
+
+// ── 10. TEXT REFRESH ──────────────────────────────────────────────
 function refreshText() {
   titleLbl.setValue(tr('title'));
   subtitleLbl.setValue(tr('subtitle'));
   langBtn.setLabel(tr('langBtn'));
-  promptLbl.setValue(tr('prompt'));
-  floodTitleLbl.setValue(tr('floodTitle'));
-  droughtTitleLbl.setValue(tr('droughtTitle'));
+  step1Lbl.setValue(tr('step1'));
   floodBtn.setLabel(tr('floodBtn'));
   droughtBtn.setLabel(tr('droughtBtn'));
   resetBtn.setLabel(tr('resetBtn'));
-  radarTitleLbl.setValue(tr('radarTitle'));
-  emilyHdr.setValue(tr('lakeHdr'));
-  santiHdr.setValue(tr('glacHdr'));
-  nadiaHdr.setValue(tr('cropHdr'));
-  tabataHdr.setValue(tr('settlHdr'));
-  methodTitle.setValue(LANG === 'en' ? 'Methodology (IPCC Framework)' : 'Metodología (Marco IPCC)');
-  methodText.setValue(LANG === 'en'
-    ? 'IMPACT = Physical Hazard × Human Exposure\nFlood: Decision tree (Rounce 2016) + Total Pop.\nDrought: Peak Water Transition (Baraer 2012) + Agri Pop.'
-    : 'IMPACTO = Peligro Físico × Exposición Humana\nInundación: Árbol Rounce (2016) + Pob. Total.\nSequía: Transición Peak Water (Baraer 2012) + Pob. Agrícola.'
+  step2Lbl.setValue(tr('step2'));
+  floodTitleLbl.setValue(tr('floodTitle'));
+  floodEqLbl.setValue(tr('floodEq'));
+  droughtTitleLbl.setValue(tr('droughtTitle'));
+  droughtEqLbl.setValue(tr('droughtEq'));
+  lakeHdr.setValue(tr('lakeHdr'));
+  glacHdr.setValue(tr('glacHdr'));
+  landHdr.setValue(tr('landHdr'));
+  settHdr.setValue(tr('settHdr'));
+  fnKeys.forEach(function(k,i){fnLabels[i].setValue(tr(k));});
+}
+
+// ── 11. RESET ─────────────────────────────────────────────────────
+var lastBasinStats = null;
+
+function resetUI() {
+  promptLbl.setValue('');
+  floodLevelLbl.setValue('\u2014');
+  floodScoreLbl.setValue('');
+  floodElevLbl.setValue('');
+  droughtLevelLbl.setValue('\u2014');
+  droughtScoreLbl.setValue('');
+  droughtNoticeLbl.setValue('');
+  droughtNoticeLbl.style().set('shown', false);
+  lakeBody.clear(); glacBody.clear();
+  landBody.clear(); settBody.clear();
+  legendPanel.style().set('shown',false);
+  reportBtn.style().set('shown',false);
+  lastBasinStats = null;
+  mainMap.layers().reset();
+  mainMap.addLayer(
+    ee.Image().byte().paint({featureCollection:basins,color:1,width:1}),
+    {palette:['#737373']},'Basins',true
+  );
+
+  // ADD THIS: Study Area Frame on Reset
+  var boundaryOutline = ee.Image().byte().paint({
+    featureCollection: ee.FeatureCollection([ee.Feature(STUDY_AREA)]),
+    color: 1,
+    width: 2.5
+  });
+  mainMap.addLayer(boundaryOutline, {palette: ['#2C3E50']}, 'Study Area Boundary');
+  
+  mainMap.addLayer(
+    ee.Image().byte().paint({featureCollection:basins,color:1,width:1}),
+    {palette:['#737373']},'Basins',true
   );
 }
 
-// Reset
-
-function resetUI() {
-  promptLbl.setValue(tr('prompt'));
-  floodLevelLbl.setValue('—');
-  floodScoreLbl.setValue('');
-  floodElevLbl.setValue('');
-  droughtLevelLbl.setValue('—');
-  droughtScoreLbl.setValue('');
-  emilyBody.clear();
-  santiBody.clear();
-  nadiaBody.clear();
-  tabataBody.clear();
-  radarPanel.clear();
+// ── 12. RISK MAP ──────────────────────────────────────────────────
+function showRiskMap(type) {
+  var bandName = type==='flood'?'flood_impact':'drought_impact';
+  var painted  = ee.Image().float().paint({
+    featureCollection:masterRisk, color:bandName
+  });
   mainMap.layers().reset();
   mainMap.addLayer(
-    ee.Image().byte().paint({featureCollection:basins, color:1, width:1}),
-    {palette:['black']}, 'Basins', true);}
+    ee.Image().byte().paint({featureCollection:basins,color:1,width:1}),
+    {palette:['#808080']},'Basins',true
+  );
+  mainMap.addLayer(painted,{
+    min:0,max:100,
+    palette:['#27AE60','#F1C40F','#E67E22','#C0392B'],
+    opacity:0.75
+  },type==='flood'?'Flood Impact':'Drought Impact');
 
-// Risk colour map
+  promptLbl.setValue(tr('step2'));
 
-function showRiskMap(type) {
-  promptLbl.setValue(tr('loading'));
-  var bandName = type === 'flood' ? 'flood_impact' : 'drought_impact';
-  var painted = ee.Image().float().paint({featureCollection: masterRisk, color: bandName});
-  mainMap.layers().reset();
-  mainMap.addLayer(ee.Image().byte().paint({
-    featureCollection:basins, color:1, width:1}), {palette:['808080']}, 'Basins', true);
-  mainMap.addLayer(painted, {
-    min: 0, max: 100, palette: ['#27AE60','#F1C40F','#E67E22','#C0392B'], opacity: 0.75}, 
-    type === 'flood' ? 'Flood Impact' : 'Drought Impact');}
+  var total     = masterRisk.size();
+  var nLow      = masterRisk.filter(ee.Filter.lte(bandName,25)).size();
+  var nMedium   = masterRisk.filter(ee.Filter.and(
+    ee.Filter.gt(bandName,25),ee.Filter.lte(bandName,45))).size();
+  var nHigh     = masterRisk.filter(ee.Filter.and(
+    ee.Filter.gt(bandName,45),ee.Filter.lte(bandName,65))).size();
+  var nVeryHigh = masterRisk.filter(ee.Filter.gt(bandName,65)).size();
 
-// Bar chart
+  ee.Dictionary({
+    total:total,nLow:nLow,nMedium:nMedium,
+    nHigh:nHigh,nVeryHigh:nVeryHigh
+  }).evaluate(function(v){
+    var t = v.total||1;
+    function fmt(n){
+      return n+' basins ('+((n/t)*100).toFixed(0)+'%)';
+    }
+    legendTitleLbl.setValue(type==='flood'?tr('legendFlood'):tr('legendDrought'));
+    legendHowLbl.setValue(type==='flood'?tr('legendHow'):tr('legendHowD'));
+    legendImpactLbl.setValue(type==='flood'?tr('legendImpact'):tr('legendImpactD'));
+    legendHazLbl.setValue(type==='flood'?tr('legendHaz'):tr('legendHazD'));
+    legendExpLbl.setValue(type==='flood'?tr('legendExp'):tr('legendExpD'));
+    legendLow.setValue('\u25cf LOW:       '+fmt(v.nLow));
+    legendMed.setValue('\u25cf MEDIUM:    '+fmt(v.nMedium));
+    legendHigh.setValue('\u25cf HIGH:      '+fmt(v.nHigh));
+    legendVH.setValue('\u25cf VERY HIGH: '+fmt(v.nVeryHigh));
+    legendPanel.style().set('shown',true);
+  });
+}
 
-function buildRadar(rLake, rSlope, rSLA, rGlacDep, rGlacLoss, rNddi) {
-  radarPanel.clear();
-  var chart = ui.Chart.array.values({
-    array: ee.Array([
-      [rLake, 0],
-      [rSlope, 0],
-      [rSLA, 0],
-      [0, rGlacDep],
-      [0, rGlacLoss],
-      [0, rNddi]]),
-    axis: 0, xLabels: ['Lake %', 'Slope', 'SLA', '% Glac', 'Loss', 'NDDI']})
-    .setChartType('ColumnChart').setSeriesNames(['Flood Hazards', 'Drought Hazards']).setOptions({
-    title: '',
-    hAxis: {slantedText:true, slantedTextAngle:45},
-    vAxis: {title:'Hazard Score',
-    minValue:0,
-    maxValue:100},
-    series: {
-      0: {color:'#dc2626'},
-      1: {color:'#d97706'}},
-    legend: {position:'bottom'},
-    bar: {groupWidth:'60%'},
-    backgroundColor: 'white',
-    height: 160,
-    chartArea: {width:'85%', height:'60%'}});
-  radarPanel.add(chart);}
-  
-// Basins
-
+// ── 13. MAP LAYERS ON CLICK ───────────────────────────────────────
 function addBasinLayers(basinGeom) {
   mainMap.layers().reset();
-  mainMap.addLayer(ee.Image().byte().paint({featureCollection:basins, color:1, width:1}),{
-    palette:['737373']}, 'Basins', true);
-  mainMap.addLayer(ee.Image().byte().paint({featureCollection: ee.FeatureCollection([ee.Feature(basinGeom)]), color:1, width:3}), {
-    palette:['black']}, 'Selected basin');
-  mainMap.addLayer(A_lakeGrowth.clip(basinGeom), {min:0, max:100,
-    palette: ['#c6dbef','#6baed6','#3182bd','#08519c','#08306b'], opacity:0.8}, 'Lake growth % (Emily)');
-  mainMap.addLayer(A_glacLoss.clip(basinGeom).selfMask(),
-    {palette:['0000FF'], opacity:0.7}, 'Glacier loss (Santi)');
-  mainMap.addLayer(A_cropland.clip(basinGeom).selfMask(),
-    {palette:['#588157'], opacity:0.7}, 'Exposed land cover (Nadia)');
-  mainMap.addLayer(A_settl.clip(basinGeom).selfMask(),
-    {palette:['#713600'], opacity:0.85}, 'Settlements (Tabata)');
-  mainMap.centerObject(basinGeom, 12);}
-  
-// Click
 
+  // 1. Basin outlines (grey)
+  mainMap.addLayer(
+    ee.Image().byte().paint({featureCollection:basins,color:1,width:1}),
+    {palette:['#737373']},'Basins',true
+  );
+
+  // 2. Selected Basin Outline (navy, 3px)
+  mainMap.addLayer(
+    ee.Image().byte().paint({
+      featureCollection:ee.FeatureCollection([ee.Feature(basinGeom)]),
+      color:1,width:3
+    }),
+    {palette:[C.navy]},'Selected basin'
+  );
+
+  // 3. Data Layers
+  mainMap.addLayer(A_cropland.clip(basinGeom).selfMask(),
+    {palette:['#588157'],opacity:0.6},'Exposed land cover (all classes)');
+
+  mainMap.addLayer(A_agri.clip(basinGeom).selfMask(),
+    {palette:['#a8c26e'],opacity:0.85},'Agriculture mosaic (class 21)');
+
+  mainMap.addLayer(A_settl.clip(basinGeom).selfMask(),
+    {palette:['#713600'],opacity:0.85},'Settlements');
+
+  // 4. Hazard Layers
+  mainMap.addLayer(A_glacLoss.clip(basinGeom).selfMask(),
+    {palette:[GLACIER_COLOR],opacity:0.85},'Glacier loss 2019\u20132025');
+
+  mainMap.addLayer(A_lakeGrowth.clip(basinGeom),{
+    min:0,max:100,
+    palette:['#4292c6','#2171b5','#08519c','#08306b','#041d4a'],
+    opacity:0.9
+  },'Lake growth %');
+
+  // 5. Current lakes on top
+  mainMap.addLayer(
+    A_lake2021.clip(basinGeom).selfMask(),
+    {palette:['#00FFFF']},
+    'Current Lakes (High Visibility)'
+  );
+  
+  // 6. Aesthetic Study Area Frame (Top Layer)
+  var boundaryOutline = ee.Image().byte().paint({
+    featureCollection: ee.FeatureCollection([ee.Feature(STUDY_AREA)]),
+    color: 1,
+    width: 2.5 // Adjust for thickness
+  });
+  
+  mainMap.addLayer(boundaryOutline, {palette: ['#2C3E50']}, 'Study Area Boundary');
+
+  mainMap.centerObject(basinGeom,11.5);
+}
+
+// ── 14. REPORT GENERATOR ──────────────────────────────────────────
+function generateReport() {
+  if (!lastBasinStats){print('No basin selected.');return;}
+  var s = lastBasinStats;
+  print('══════════════════════════════════════════');
+  print('BASIN REPORT \u2014 HYBAS_ID: '+s.basinId);
+  print('Basin area: '+s.basinKm2.toFixed(1)+' km\u00b2');
+  print('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+  print('FLOOD RISK');
+  print('  Impact\u00b3:   '+s.floodImpact+' / 100  ['+riskLevel(s.floodImpact)+']');
+  print('  Hazard\u00b9:   '+s.floodHazard);
+  print('  Exposure\u00b2: '+s.exposureScore.toFixed(0));
+  print('  Tier elevated: '+(s.tierElevated?'Yes':'No'));
+  print('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+  print('DROUGHT RISK (GDBDI\u00b9\u2070)');
+  print('  Impact\u2076:   '+s.droughtImpact+' / 100  ['+riskLevel(s.droughtImpact)+']');
+  print('  Hazard\u2074:   '+s.droughtHazard);
+  print('  Exposure\u2075: '+s.exposureScore.toFixed(0));
+  print('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+  print('LAKE GROWTH (2010\u20132021)');
+  print('  Area 2021: '+s.lakeKm2.toFixed(3)+' km\u00b2');
+  print('  Growth:    '+(s.lakeGrowthPct>=0?'+':'')+s.lakeGrowthPct.toFixed(1)+'%');
+  print('  Above avg? '+(s.lakeGrowthPct>MEAN_LAKE_GROWTH_PCT?'Yes':'No')+
+        '  (study avg: '+MEAN_LAKE_GROWTH_PCT+'%)');
+  print('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+  print('GLACIER RECESSION (2019\u20132025)');
+  print('  Area 2025: '+s.g2025.toFixed(2)+' km\u00b2');
+  print('  Loss:      '+s.glacLoss.toFixed(2)+' km\u00b2');
+  print('  Loss rate: '+s.lossPct.toFixed(1)+'%');
+  print('  Above avg? '+(s.lossPct>MEAN_GLAC_LOSS_PCT?'Yes':'No')+
+        '  (study avg: '+MEAN_GLAC_LOSS_PCT+'%)');
+  print('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+  print('LAND COVER (2024, 2000\u20133800m)');
+  print('  Exposed land\u2079: '+s.cropKm2.toFixed(2)+' km\u00b2');
+  print('  Agri mosaic:   '+s.agriKm2.toFixed(2)+' km\u00b2');
+  print('\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500');
+  print('SETTLEMENTS & POPULATION');
+  print('  Settlement area: '+s.settKm2.toFixed(2)+' km\u00b2');
+  print('  Basin density:   '+(s.settKm2/s.basinKm2*100).toFixed(2)+'%');
+  print('  Total pop.\u2077:     '+s.popTotal.toLocaleString());
+  print('  Pop. density:    '+(s.popTotal/s.basinKm2).toFixed(1)+' people/km\u00b2');
+  print('══════════════════════════════════════════');
+}
+
+// ── 15. CLICK HANDLER ─────────────────────────────────────────────
 mainMap.onClick(function(coords) {
   var point = ee.Geometry.Point([coords.lon, coords.lat]);
-  STUDY_AREA.contains(point, 1).evaluate(function(inside) {
-    if (!inside) { promptLbl.setValue(tr('outside')); return; }
+
+  STUDY_AREA.contains(point,1).evaluate(function(inside) {
+    if (!inside){promptLbl.setValue(tr('outside'));return;}
+
     promptLbl.setValue(tr('loading'));
-    emilyBody.clear(); santiBody.clear(); nadiaBody.clear(); tabataBody.clear(); radarPanel.clear(); floodElevLbl.setValue('');
+    lakeBody.clear(); glacBody.clear();
+    landBody.clear(); settBody.clear();
+    floodElevLbl.setValue('');
+    reportBtn.style().set('shown',false);
 
     basins.filterBounds(point).first().evaluate(function(basin) {
       if (!basin) return;
+
       var basinGeom = ee.Feature(basin).geometry();
       var basinId   = basin.properties.HYBAS_ID;
       addBasinLayers(basinGeom);
 
-      // Reducers
-      var lakeKm2Val = ee.Number(A_lake2021.clip(basinGeom).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30}).get('water', 0)).multiply(0.0009);
-      var lake1990Val = ee.Number(A_lake1990.clip(basinGeom).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30}).get('water', 0)).multiply(0.0009);
-      var slopeVal = ee.Number(slope.reduceRegion({reducer:ee.Reducer.mean(), geometry:basinGeom, scale:30}).get('slope', 0));
-      var basinLakes = A_lakePoly.filterBounds(basinGeom);
-      var slaVal = ee.Algorithms.If(basinLakes.size().gt(0), basinLakes.aggregate_mean('sla_deg'), ee.Number(0));
-      var g2025Val = ee.Number(A_glac2025.clip(basinGeom).multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:20}).get('glacier', 0)).divide(1e6);
-      var g2019Val = ee.Number(A_glac2019.clip(basinGeom).multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:20}).get('glacier', 0)).divide(1e6);
-      var agriVal = ee.Number(A_agri.clip(basinGeom).multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30}).get('exposed', 0)).divide(1e6);
-      var settVal = ee.Number(A_settl.clip(basinGeom).multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:10, tileScale:4}).get('settlement', 0)).divide(1e6);
-      var popTotalVal = ee.Number(A_pop.clip(basinGeom).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:100}).get('population', 0));
-      var popExposedVal = ee.Number(A_pop.clip(basinGeom).updateMask(A_cropland.clip(basinGeom)).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:100}).get('population', 0));
+      var basinRisk = masterRisk
+        .filter(ee.Filter.eq('HYBAS_ID', basinId))
+        .first();
+
+      var lakeKm2Val = ee.Number(A_lake2021.clip(basinGeom)
+        .reduceRegion({reducer:ee.Reducer.sum(),
+          geometry:basinGeom,scale:30,maxPixels:1e10})
+        .get('water',0)).multiply(0.0009);
+
+      var lake2010Val = ee.Number(A_lake2010.clip(basinGeom)
+        .reduceRegion({reducer:ee.Reducer.sum(),
+          geometry:basinGeom,scale:30,maxPixels:1e10})
+        .get('water',0)).multiply(0.0009);
+
+      var g2025Val = ee.Number(A_glac2025.clip(basinGeom)
+        .multiply(ee.Image.pixelArea())
+        .reduceRegion({reducer:ee.Reducer.sum(),
+          geometry:basinGeom,scale:20,maxPixels:1e10})
+        .get('glacier',0)).divide(1e6);
+
+      var g2019Val = ee.Number(A_glac2019.clip(basinGeom)
+        .multiply(ee.Image.pixelArea())
+        .reduceRegion({reducer:ee.Reducer.sum(),
+          geometry:basinGeom,scale:20,maxPixels:1e10})
+        .get('glacier',0)).divide(1e6);
+
+      var cropVal = ee.Number(A_cropland.clip(basinGeom)
+        .multiply(ee.Image.pixelArea())
+        .reduceRegion({reducer:ee.Reducer.sum(),
+          geometry:basinGeom,scale:30,maxPixels:1e10})
+        .get('exposed',0)).divide(1e6);
+
+      var agriVal = ee.Number(A_agri.clip(basinGeom)
+        .multiply(ee.Image.pixelArea())
+        .reduceRegion({reducer:ee.Reducer.sum(),
+          geometry:basinGeom,scale:30,maxPixels:1e10})
+        .get('exposed',0)).divide(1e6);
+
+      var settVal = ee.Number(A_settl.clip(basinGeom)
+        .multiply(ee.Image.pixelArea())
+        .reduceRegion({reducer:ee.Reducer.sum(),
+          geometry:basinGeom,scale:10,
+          maxPixels:1e13,tileScale:4})
+        .get('settlement',0)).divide(1e6);
+
+      var popTotalVal = ee.Number(A_pop.clip(basinGeom)
+        .reduceRegion({reducer:ee.Reducer.sum(),
+          geometry:basinGeom,scale:100,maxPixels:1e10})
+        .get('population',0));
+
       var basinKm2Val = ee.Number(basinGeom.area(1)).divide(1e6);
 
-      // Dynamic NDDI
-      var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filterBounds(basinGeom).filterDate('2024-06-01', '2024-09-30').filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)).median();
-      var ndvi = s2.normalizedDifference(['B8', 'B4']); 
-      var ndwi = s2.normalizedDifference(['B8', 'B11']);
-      var nddiVal = ee.Number(ndvi.subtract(ndwi).divide(ndvi.add(ndwi)).reduceRegion({reducer: ee.Reducer.mean(), geometry: basinGeom, scale: 100}).get('nd', 0));
-
       ee.Dictionary({
-        lakeKm2: lakeKm2Val, lake1990: lake1990Val, slopeDeg: slopeVal, slaDeg: slaVal,
-        g2025: g2025Val, g2019: g2019Val, agriKm2: agriVal, settKm2: settVal,
-        basinKm2: basinKm2Val, popTotal: popTotalVal, popExposed: popExposedVal, nddi: nddiVal
-      }).evaluate(function(v) {
-        var basinKm2 = v.basinKm2 || 1; 
-        var popTotal = Math.round(v.popTotal || 0);
-        var popExposed = Math.round(v.popExposed || 0);
-        var glacLoss = Math.max(v.g2019 - v.g2025, 0);
-        var lossPct = v.g2019 > 0 ? (glacLoss / v.g2019 * 100) : 0;
-        var glacPct = (v.g2025 / basinKm2) * 100;
-        
-        // ── IMPACT CALCULATION (LOGICAL SPLIT) ──
-        var popScoreFlood = Math.min(popTotal / 20000, 1.0) * 50;
-        var popScoreDrought = Math.min(popExposed / 10000, 1.0) * 50;
-        var agriAreaScore = Math.min(v.agriKm2 / 20, 1.0) * 50;
+        floodHazard:   basinRisk.get('flood_hazard'),
+        droughtHazard: basinRisk.get('drought_hazard'),
+        floodImpact:   basinRisk.get('flood_impact'),
+        droughtImpact: basinRisk.get('drought_impact'),
+        exposureScore: basinRisk.get('exposure_score'),
+        lakeGrowthPct: basinRisk.get('lake_growth_pct'),
+        slaDeg:        basinRisk.get('sla_deg'),
+        slopeNear:     basinRisk.get('slope_near_lakes'),
+        glacLossPct:   basinRisk.get('glac_loss_pct'),
+        lakeKm2:    lakeKm2Val,  lake2010:  lake2010Val,
+        g2025:      g2025Val,    g2019:     g2019Val,
+        cropKm2:    cropVal,     agriKm2:   agriVal,
+        settKm2:    settVal,     popTotal:  popTotalVal,
+        basinKm2:   basinKm2Val
+      }).evaluate(function(v){
 
-        var floodHaz = computeFloodHazard(v.lakeKm2, v.lake1990, glacLoss, v.g2019, v.slopeDeg, v.slaDeg);
-        var droughtHaz = computeDroughtHazard(glacPct, lossPct, v.nddi);
+        var floodHazard   = v.floodHazard   || 0;
+        var droughtHazard = v.droughtHazard || 0;
+        var floodImpact   = v.floodImpact   || 0;
+        var droughtImpact = v.droughtImpact || 0;
+        var exposureScore = v.exposureScore || 0;
+        var lakeGrowthPct = v.lakeGrowthPct || 0;
+        var glacLossPct   = v.glacLossPct   || 0;
 
-        var floodImpact = Math.round((floodHaz.score / 100) * (popScoreFlood + agriAreaScore));
-        var droughtImpact = Math.round((droughtHaz.score / 100) * (popScoreDrought + agriAreaScore));
-        
-        // ── BAR CHART ──
-        var lakeGrowthPct = v.lake1990 > 0 ? ((v.lakeKm2 - v.lake1990) / v.lake1990 * 100) : 0;
-        var lakeRadar = Math.min(Math.max(lakeGrowthPct, 0), 100);
-        var slopeRadar = Math.min((v.slopeDeg / 45) * 100, 100);
-        var slaRadar = Math.min((v.slaDeg / 20) * 100, 100);
-        buildRadar(
-          lakeRadar,
-          slopeRadar,
-          slaRadar,
-          droughtHaz.radarDep,
-          droughtHaz.radarLoss,
-          droughtHaz.radarNddi);
+        var basinKm2  = v.basinKm2 || 1;
+        var popTotal  = Math.round(v.popTotal || 0);
+        var glacLoss  = Math.max((v.g2019||0)-(v.g2025||0),0);
+        var lossPct   = v.g2019 > 0.1 ? (glacLoss / v.g2019 * 100) : 0;
+        var settDens  = (v.settKm2/basinKm2*100).toFixed(2)+'%';
+        var tierElevated = lakeGrowthPct>MEAN_LAKE_GROWTH_PCT &&
+                           glacLossPct>MEAN_GLAC_LOSS_PCT;
 
-        promptLbl.setValue('Basin: ' + basinId);
-        floodLevelLbl.setValue(riskLevel(floodImpact)); 
-        floodLevelLbl.style().set('color', riskColor(floodImpact));
-        floodScoreLbl.setValue('Impact: ' + floodImpact + ' / 100');
-        floodElevLbl.setValue('Hazard: ' + floodHaz.score + ' | Exposure: ' + Math.round(popScoreFlood + agriAreaScore));
+        // ── Risk boxes ────────────────────────────────────────────
+        promptLbl.setValue(
+          'Basin: '+basinId+'  \u2502  Area: '+basinKm2.toFixed(1)+' km\u00b2'
+        );
 
-        droughtLevelLbl.setValue(riskLevel(droughtImpact)); 
-        droughtLevelLbl.style().set('color', riskColor(droughtImpact));
-        droughtScoreLbl.setValue('Impact: ' + droughtImpact + ' / 100');
-        droughtTitleLbl.setValue(tr('droughtTitle') + ' (Haz: ' + droughtHaz.score + ' | Exp: ' + Math.round(popScoreDrought + agriAreaScore) + ')');
+        floodLevelLbl.setValue(riskLevel(floodImpact));
+        floodLevelLbl.style().set('color',riskColor(floodImpact));
+        floodScoreLbl.setValue(
+          'Impact\u00b3: '+(floodImpact||0)+' / 100  \u2502  '+
+          'Hazard\u00b9: '+(floodHazard||0)+'  \u2502  '+
+          'Exposure\u00b2: '+Math.round(exposureScore||0)
+        );
+        floodElevLbl.setValue(
+          tierElevated
+            ? '\u2B06 Tier elevated \u2014 above avg lake growth AND glacier loss'
+            : ''
+        );
 
-        // Stats Display
-        emilyBody.clear().add(statRow(tr('lakeArea'), v.lakeKm2.toFixed(3)+' km²')).add(statRow(tr('slope'), v.slopeDeg.toFixed(1)+'°'));
-        santiBody.clear().add(statRow(tr('glacArea'), v.g2025.toFixed(2)+' km²')).add(statRow(tr('glacLoss'), glacLoss.toFixed(2)+' km² ('+lossPct.toFixed(1)+'%)'));
-        nadiaBody.clear().add(statRow(tr('glacDep'), glacPct.toFixed(2)+'%')).add(statRow(tr('nddi'), (v.nddi||0).toFixed(3)));
-        // Updated Stats Display for Tabata
-        tabataBody.clear()
-          .add(statRow(tr('popTotal') + ' (Flood)', popTotal.toLocaleString()))
-          .add(statRow(tr('popExposed') + ' (Drought)', popExposed.toLocaleString(), popExposed > 0 ? '#e74c3c' : '#222'))
-          .add(statRow(tr('settlArea'), v.settKm2.toFixed(2)+' km²'));
-        
+        droughtLevelLbl.setValue(riskLevel(droughtImpact));
+        droughtLevelLbl.style().set('color',riskColor(droughtImpact));
+        droughtScoreLbl.setValue(
+          'Impact\u2076: '+(droughtImpact||0)+' / 100  \u2502  '+
+          'Hazard\u2074: '+(droughtHazard||0)+'  \u2502  '+
+          'Exposure\u2075: '+Math.round(exposureScore||0)
+        );
+
+        // Contextual notice for non-glaciated basins
+        var noGlacialCoverage = (v.g2019||0) < 0.1 && (v.lakeKm2||0) < 0.1;
+        if (noGlacialCoverage) {
+          droughtNoticeLbl.setValue(
+            '\u26a0 No glacial coverage detected \u2014 score reflects ' +
+            'vegetation stress (NDDI) only. Basin may be indirectly ' +
+            'affected by upstream deglaciation.'
+          );
+          droughtNoticeLbl.style().set('shown', true);
+        } else {
+          droughtNoticeLbl.setValue('');
+          droughtNoticeLbl.style().set('shown', false);
+        }
+
+        // ── Stat grid ─────────────────────────────────────────────
+        lakeBody.clear();
+        lakeBody.add(twoCol(
+          statCell('Area 2021', (v.lakeKm2||0).toFixed(3)+' km\u00b2'),
+          statCell('Growth',
+            (lakeGrowthPct>=0?'+':'')+lakeGrowthPct.toFixed(1)+'%',
+            lakeGrowthPct>MEAN_LAKE_GROWTH_PCT?'#C0392B':'#27AE60')
+        ));
+        lakeBody.add(twoCol(
+          statCell('SLA\u00b9 (moraine angle)',
+            (v.slaDeg||0).toFixed(1)+'\u00b0',
+            (v.slaDeg||0) >= 10 ? '#C0392B' : '#27AE60'),
+          statCell('Slope near lake\u00b9',
+            (v.slopeNear||0).toFixed(1)+'\u00b0',
+            (v.slopeNear||0) > 45 ? '#C0392B' : '#27AE60')
+        ));
+
+        glacBody.clear();
+        glacBody.add(twoCol(
+          statCell('Area 2025',(v.g2025||0).toFixed(2)+' km\u00b2'),
+          statCell('Loss',glacLoss.toFixed(2)+' km\u00b2',
+            glacLoss>0?'#C0392B':'#27AE60')
+        ));
+        glacBody.add(twoCol(
+          statCell('Loss rate',
+            v.g2019 < 0.1 ? 'n/a' : lossPct.toFixed(1)+'%',
+            v.g2019 < 0.1 ? C.lgrey :
+              lossPct > MEAN_GLAC_LOSS_PCT ? '#C0392B' : '#27AE60'),
+          statCell('Above avg?',
+            v.g2019 < 0.1 ? 'n/a' :
+              lossPct > MEAN_GLAC_LOSS_PCT ? '\u2B06 Yes' : 'No',
+            v.g2019 < 0.1 ? C.lgrey :
+              lossPct > MEAN_GLAC_LOSS_PCT ? '#C0392B' : '#27AE60')
+        ));
+
+        landBody.clear();
+        landBody.add(twoCol(
+          statCell('Elev. band (set)','2000\u20133800m'),
+          statCell('Exposed land\u2079',(v.cropKm2||0).toFixed(2)+' km\u00b2')
+        ));
+        landBody.add(twoCol(
+          statCell('Agri mosaic (cl.21)',(v.agriKm2||0).toFixed(2)+' km\u00b2'),
+          statCell('% agri mosaic',
+            (v.cropKm2||0)>0
+              ?(((v.agriKm2||0)/(v.cropKm2||1))*100).toFixed(1)+'%'
+              :'0%')
+        ));
+
+        settBody.clear();
+        settBody.add(twoCol(
+          statCell('Settl. area',(v.settKm2||0).toFixed(2)+' km\u00b2'),
+          statCell('Basin density',settDens)
+        ));
+        settBody.add(twoCol(
+          statCell('Total pop.\u2077', popTotal.toLocaleString()),
+          statCell('Pop. density',
+            (popTotal / basinKm2).toFixed(1) + ' /km\u00b2')
+        ));
+
+        // Store for report and export
+        lastBasinStats = {
+          basinId:      basinId,
+          basinKm2:     basinKm2,
+          floodHazard:  floodHazard,
+          droughtHazard:droughtHazard,
+          floodImpact:  floodImpact,
+          droughtImpact:droughtImpact,
+          exposureScore:exposureScore,
+          lakeGrowthPct:lakeGrowthPct,
+          glacLossPct:  glacLossPct,
+          tierElevated: tierElevated,
+          lakeKm2:      v.lakeKm2||0,
+          g2025:        v.g2025||0,
+          g2019:        v.g2019||0,
+          glacLoss:     glacLoss,
+          lossPct:      lossPct,
+          cropKm2:      v.cropKm2||0,
+          agriKm2:      v.agriKm2||0,
+          settKm2:      v.settKm2||0,
+          popTotal:     popTotal
+        };
+
+        reportBtn.style().set('shown',true);
       });
     });
   });
 });
 
-refreshText(); resetUI(); mainMap.setCenter(-77.4, -9.2, 10);
+// ── 16. INITIALISE ────────────────────────────────────────────────
+refreshText();
+resetUI();
+mainMap.setCenter(-77.4,-9.2,8.4);

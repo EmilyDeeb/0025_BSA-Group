@@ -1,109 +1,324 @@
 // ════════════════════════════════════════════════════════════════
 // CORDILLERA BLANCA — BACKEND PART 2 (BASIN RISK TABLE)
-// Goal: Load pre-computed raster assets, calculate Hazard and 
-// Exposure across all basins, and export the Master Impact Table.
+// CASA0025 Group Project
 // ════════════════════════════════════════════════════════════════
 
 // ── 1. ASSETS ────────────────────────────────────────────────────
-var PROJECT = 'users/emilymdeeb/GroupProject/';
-var STUDY_AREA = ee.Geometry.Rectangle([-77.8, -10.0, -77.0, -8.5]);
+var PROJECT   = 'projects/cordillera-blanca-risk-app/assets/';
+var STUDY_AREA = ee.FeatureCollection(PROJECT + 'boundbox').first().geometry();
 
-var A_lake1990   = ee.Image(PROJECT + 'lake_1990').rename('water');
-var A_lake2021   = ee.Image(PROJECT + 'lake_2021').rename('water');
-var A_lakePoly   = ee.FeatureCollection(PROJECT + 'lake_polygons');
-var A_glac2019   = ee.Image(PROJECT + 'glacier_2019').rename('glacier');
-var A_glac2025   = ee.Image(PROJECT + 'glacier_2025').rename('glacier');
-var A_glacLoss   = ee.Image(PROJECT + 'glacier_loss').rename('glacier_loss');
-var A_cropland   = ee.Image(PROJECT + 'exposed_landcover').rename('exposed');
-var A_bofedales  = ee.Image(PROJECT + 'bofedales').rename('exposed');
-var A_agri       = ee.Image(PROJECT + 'agriculture').rename('exposed');
-var A_settl      = ee.Image(PROJECT + 'settlements_dw2024').rename('settlement');
-var A_pop        = ee.Image(PROJECT + 'population_2020').rename('population'); 
+var A_lake2010  = ee.Image(PROJECT + 'lake_2010').rename('water');
+var A_lake2021  = ee.Image(PROJECT + 'lake_2021').rename('water');
+var A_lakePoly  = ee.FeatureCollection(PROJECT + 'lake_polygons');
+var A_glac2019  = ee.Image(PROJECT + 'glacier_2019').rename('glacier');
+var A_glac2025  = ee.Image(PROJECT + 'glacier_2025').rename('glacier');
+var A_glacLoss  = ee.Image(PROJECT + 'glacier_loss').rename('glacier_loss');
+var A_agri      = ee.Image(PROJECT + 'agriculture').rename('exposed');
+var A_settl     = ee.Image(PROJECT + 'settlements_dw2024').rename('settlement');
+var A_pop       = ee.Image(PROJECT + 'population_2020').rename('population');
 
-var dem   = ee.Image('USGS/SRTMGL1_003').clip(STUDY_AREA);
-var slope = ee.Terrain.slope(dem).rename('slope');
+var dem    = ee.Image('USGS/SRTMGL1_003').clip(STUDY_AREA);
+var slope  = ee.Terrain.slope(dem).rename('slope');
 var basins = ee.FeatureCollection('WWF/HydroSHEDS/v1/Basins/hybas_12')
-  .filterBounds(STUDY_AREA);
+  .filterBounds(STUDY_AREA)
+  .map(function(basin) {
+    return basin.intersection(STUDY_AREA, ee.ErrorMargin(1));
+  });
+  
+var MEAN_LAKE_GROWTH_PCT = 16;
+var MEAN_GLAC_LOSS_PCT   = 7.4;
+var POP_THRESHOLD        = 6039;
 
-var MEAN_LAKE_GROWTH_PCT = 30.9;
-var MEAN_GLAC_LOSS_PCT   = 7.32;
+// Minimum thresholds for meaningful values
+// Below these, percentage calculations are mathematical artefacts
+var MIN_GLACIER_KM2 = 0.1;   // minimum glacier area for loss % to be meaningful
+var MIN_LAKE_KM2    = 0.001; // minimum lake area in 2010 for growth % to be meaningful
+var MIN_GLACIAL_KM2 = 0.1;   // minimum glacier OR lake for GLOF mechanism to exist
 
-// ── 2. CALCULATE BASIN IMPACT ─────────────────────────────────────
+// ── 2. NDDI — PRE-COMPUTED OUTSIDE LOOP ──────────────────────────
+// Glacial Dependent Basin Drought Index — Dimension 3: Current Environmental Stress
+// Normalized Difference Drought Index (NDDI) following Gu et al. (2007):
+//   NDDI = (NDVI − NDWI) / (NDVI + NDWI)
+//   NDVI = (B8 − B4) / (B8 + B4)
+//   NDWI = (B3 − B8) / (B3 + B8)  [McFeeters 1996]
+// Higher NDDI indicates greater vegetation/moisture stress.
+//
+// Sentinel-2 SR dry season (Jun–Sep) median composite, 2022–2024.
+// Dry season matches JRC lake detection period and minimises cloud cover.
+// Three-year median suppresses inter-annual variability (Hoque et al. 2020).
+// Pre-computed here once — computing per-basin inside basins.map() would
+// require a full collection filter per iteration and cannot be parallelised.
+
+var s2DryMedian = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(STUDY_AREA)
+  .filter(ee.Filter.calendarRange(6, 9, 'month'))     // June–September
+  .filter(ee.Filter.calendarRange(2022, 2024, 'year'))
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .select(['B3', 'B4', 'B8'])
+  .median()
+  .clip(STUDY_AREA);
+
+var ndviImg = s2DryMedian.normalizedDifference(['B8', 'B4']).rename('ndvi');
+var ndwiImg = s2DryMedian.normalizedDifference(['B3', 'B8']).rename('ndwi');
+
+// Clamp denominator away from zero to avoid division artefacts in
+// snow/ice-covered pixels where NDVI + NDWI ≈ 0
+var nddiImg = ndviImg.subtract(ndwiImg)
+  .divide(ndviImg.add(ndwiImg).abs().max(0.0001))
+  .rename('nddi');
+
+// ── 3. CALCULATE BASIN IMPACT ─────────────────────────────────────
 var basinStats = basins.map(function(basin) {
   var basinGeom = basin.geometry();
-  
-  // A. Reduce flat raster assets (Fast!)
-  var lakeKm2Val = ee.Number(A_lake2021.reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('water', 0)).multiply(0.0009);
-  var lake1990Val = ee.Number(A_lake1990.reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('water', 0)).multiply(0.0009);
-  var glac2025Val = ee.Number(A_glac2025.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:20, maxPixels:1e10, tileScale: 4}).get('glacier', 0)).divide(1e6);
-  var glac2019Val = ee.Number(A_glac2019.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:20, maxPixels:1e10, tileScale: 4}).get('glacier', 0)).divide(1e6);
-  var glacLossVal = ee.Number(A_glacLoss.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:20, maxPixels:1e10, tileScale: 4}).get('glacier_loss', 0)).divide(1e6);
-  var slopeVal = ee.Number(slope.reduceRegion({reducer:ee.Reducer.mean(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('slope', 0));
-  var cropVal = ee.Number(A_cropland.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('exposed', 0)).divide(1e6);
-  var settVal = ee.Number(A_settl.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:10, maxPixels:1e13, tileScale: 4}).get('settlement', 0)).divide(1e6);
-  var bofedVal = ee.Number(A_bofedales.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('exposed', 0)).divide(1e6);
-  var agriVal = ee.Number(A_agri.multiply(ee.Image.pixelArea()).reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:30, maxPixels:1e10, tileScale: 4}).get('exposed', 0)).divide(1e6);
-  var popVal = ee.Number(A_pop.reduceRegion({reducer:ee.Reducer.sum(), geometry:basinGeom, scale:100, maxPixels:1e10, tileScale: 4}).get('population', 0));
+
+  // ── Raster reductions ─────────────────────────────────────────
+  var lakeKm2Val = ee.Number(A_lake2021.reduceRegion({
+    reducer:   ee.Reducer.sum(),
+    geometry:  basinGeom,
+    scale:     30, maxPixels:1e10, tileScale:4
+  }).get('water', 0)).multiply(0.0009);
+
+  var lake2010Val = ee.Number(A_lake2010.reduceRegion({
+    reducer:   ee.Reducer.sum(),
+    geometry:  basinGeom,
+    scale:     30, maxPixels:1e10, tileScale:4
+  }).get('water', 0)).multiply(0.0009);
+
+  var glac2019Val = ee.Number(A_glac2019.multiply(ee.Image.pixelArea())
+    .reduceRegion({
+      reducer:   ee.Reducer.sum(),
+      geometry:  basinGeom,
+      scale:     20, maxPixels:1e10, tileScale:4
+    }).get('glacier', 0)).divide(1e6);
+
+  var glac2025Val = ee.Number(A_glac2025.multiply(ee.Image.pixelArea())
+    .reduceRegion({
+      reducer:   ee.Reducer.sum(),
+      geometry:  basinGeom,
+      scale:     20, maxPixels:1e10, tileScale:4
+    }).get('glacier', 0)).divide(1e6);
+
+  var glacLossVal = ee.Number(A_glacLoss.multiply(ee.Image.pixelArea())
+    .reduceRegion({
+      reducer:   ee.Reducer.sum(),
+      geometry:  basinGeom,
+      scale:     20, maxPixels:1e10, tileScale:4
+    }).get('glacier_loss', 0)).divide(1e6);
+
+  var agriVal = ee.Number(A_agri.multiply(ee.Image.pixelArea())
+    .reduceRegion({
+      reducer:   ee.Reducer.sum(),
+      geometry:  basinGeom,
+      scale:     30, maxPixels:1e10, tileScale:4
+    }).get('exposed', 0)).divide(1e6);
+
+  var settVal = ee.Number(A_settl.multiply(ee.Image.pixelArea())
+    .reduceRegion({
+      reducer:   ee.Reducer.sum(),
+      geometry:  basinGeom,
+      scale:     10, maxPixels:1e13, tileScale:4
+    }).get('settlement', 0)).divide(1e6);
+
+  var popVal = ee.Number(A_pop.reduceRegion({
+    reducer:   ee.Reducer.sum(),
+    geometry:  basinGeom,
+    scale:     100, maxPixels:1e10, tileScale:4
+  }).get('population', 0));
+
   var basinKm2Val = ee.Number(basinGeom.area(1)).divide(1e6);
 
-  var basinLakes = A_lakePoly.filterBounds(basinGeom);
-  var slaVal = ee.Number(ee.Algorithms.If(basinLakes.size().gt(0), basinLakes.aggregate_mean('sla_deg'), 0));
+  // ── NDDI — mean within basin ───────────────────────────────────
+  // Mean NDDI over the basin captures the integrated vegetation/moisture
+  // stress signal across the agricultural and pastoral zones (Gu et al. 2007).
+  var nddiVal = ee.Number(nddiImg.reduceRegion({
+    reducer:   ee.Reducer.mean(),
+    geometry:  basinGeom,
+    scale:     20, maxPixels:1e10, tileScale:4
+  }).get('nddi', 0));
 
-  // B. Server-Side FLOOD Hazard Logic (0-100)
-  var dynamicFailure = slopeVal.gt(30).or(slopeVal.gt(45));
+  // ── Slope — max within 500m buffer of lake polygons ───────────
+  // Rounce et al. (2016): mass movement assessed near lake geometry
+  // Sattar et al. (2021): 45–55° avalanche zone
+  var basinLakes = A_lakePoly.filterBounds(basinGeom);
+
+  var slopeVal = ee.Number(ee.Algorithms.If(
+    basinLakes.size().gt(0),
+    slope.reduceRegion({
+      reducer:   ee.Reducer.max(),
+      geometry:  basinLakes.geometry().buffer(500),
+      scale:     30, maxPixels:1e10, tileScale:4
+    }).get('slope', 0),
+    // Fallback: no lake polygons in basin — use basin max slope
+    slope.reduceRegion({
+      reducer:   ee.Reducer.max(),
+      geometry:  basinGeom,
+      scale:     30, maxPixels:1e10, tileScale:4
+    }).get('slope', 0)
+  ));
+
+  var slaVal = ee.Number(ee.Algorithms.If(
+    basinLakes.size().gt(0),
+    basinLakes.aggregate_mean('sla_deg'),
+    0
+  ));
+
+  // ── FLOOD HAZARD — decision tree (Rounce et al. 2016) ─────────
+  // GUARD: Basin must have a meaningful glacier OR lake for GLOF
+  // mechanism to physically exist. Without either, cap at LOW (20).
+  // MIN_GLACIAL_KM2 = 0.1 km² — below this is a mathematical artefact.
+  var hasGlacier  = glac2019Val.gt(MIN_GLACIAL_KM2);
+  var hasLake     = lakeKm2Val.gt(MIN_GLACIAL_KM2);
+  var glacialRisk = hasGlacier.or(hasLake);
+
+  // Dynamic failure: max slope > 45° (rockfall) or > 55° (avalanche)
+  // Self-destructive: SLA ≥ 10° (Fujita et al. 2013)
+  var dynamicFailure  = slopeVal.gt(45).or(slopeVal.gt(55));
   var selfDestructive = slaVal.gte(10);
 
   var floodBaseScore = ee.Number(ee.Algorithms.If(
-    dynamicFailure.and(selfDestructive), 90,
-    ee.Algorithms.If(dynamicFailure.and(selfDestructive.not()), 65,
-      ee.Algorithms.If(dynamicFailure.not().and(selfDestructive), 45, 20))
+    // Guard: no meaningful glacial system → always Low
+    glacialRisk.not(), 20,
+    ee.Algorithms.If(
+      dynamicFailure.and(selfDestructive),          90,  // Very High
+      ee.Algorithms.If(
+        dynamicFailure.and(selfDestructive.not()),   65,  // High
+        ee.Algorithms.If(
+          dynamicFailure.not().and(selfDestructive), 45,  // Medium
+          20                                              // Low
+        )
+      )
+    )
   ));
 
-  var basinLakeGrowthPct = ee.Number(ee.Algorithms.If(lake1990Val.gt(0), lakeKm2Val.subtract(lake1990Val).divide(lake1990Val).multiply(100), 0));
-  var basinGlacLossPct = ee.Number(ee.Algorithms.If(glac2019Val.gt(0), glacLossVal.divide(glac2019Val).multiply(100), 0));
+  // Tier elevation: both lake growth AND glacier loss above study average
+  // GUARD: Only compute percentages if base values are meaningful
+  var basinLakeGrowthPct = ee.Number(ee.Algorithms.If(
+    lake2010Val.gt(MIN_LAKE_KM2),
+    lakeKm2Val.subtract(lake2010Val).divide(lake2010Val).multiply(100),
+    0  // No meaningful lake in 2010 → growth % = 0
+  ));
+
+  var basinGlacLossPct = ee.Number(ee.Algorithms.If(
+    glac2019Val.gt(MIN_GLACIER_KM2),
+    glacLossVal.divide(glac2019Val).multiply(100),
+    0  // No meaningful glacier in 2019 → loss % = 0 (avoids 100% artefact)
+  ));
 
   var floodHazard = ee.Number(ee.Algorithms.If(
-    basinLakeGrowthPct.gt(MEAN_LAKE_GROWTH_PCT).and(basinGlacLossPct.gt(MEAN_GLAC_LOSS_PCT)),
-    floodBaseScore.add(25).min(90), 
+    basinLakeGrowthPct.gt(MEAN_LAKE_GROWTH_PCT)
+      .and(basinGlacLossPct.gt(MEAN_GLAC_LOSS_PCT)),
+    floodBaseScore.add(25).min(90),
     floodBaseScore
   )).round();
 
-  // C. Server-Side DROUGHT Hazard Logic (0-100)
-  var droughtBaseScore = ee.Number(
-    ee.Algorithms.If(cropVal.gt(20), 85,
-      ee.Algorithms.If(cropVal.gt(10), 60,
-        ee.Algorithms.If(cropVal.gt(2), 35, 15)))
-  );
-  
-  droughtBaseScore = ee.Number(ee.Algorithms.If(bofedVal.gt(0.5), droughtBaseScore.add(10), droughtBaseScore));
-  var settDensityPct = settVal.divide(basinKm2Val.max(0.001)).multiply(100);
-  
-  droughtBaseScore = ee.Number(ee.Algorithms.If(settDensityPct.gt(2), droughtBaseScore.add(10),
-    ee.Algorithms.If(settDensityPct.gt(1), droughtBaseScore.add(5), droughtBaseScore)));
+  // ── DROUGHT HAZARD — Glacial Dependent Basin Drought Index ────
+  // Multi-criteria geospatial framework inspired by the vulnerability
+  // mapping of Hoque et al. (2020) and the Peak Water transition theory
+  // of Baraer et al. (2012) for the Cordillera Blanca. Shifts focus from
+  // purely meteorological drought to structural water-scarcity risk driven
+  // by deglaciation.
+  //
+  // Three dimensions, each standardised 1–5 and integrated via Weighted
+  // Linear Combination (WLC) with equal weights, then rescaled to 0–100.
+  // Risk tiers: Low ≤ 25  |  Moderate 26–50  |  High 51–75  |  Very High > 75
 
-  var droughtHazard = droughtBaseScore.min(100).round();
+  // ── Dimension 1: % Glacier Area (Exposure / Dependence) ──────
+  // Ratio of glacierised area (2019) to total basin area.
+  // Identifies structural dependence on glacial meltwater as a seasonal
+  // dry-period buffer (Ultee et al. 2022).
+  // GUARD: if no meaningful glacier present, dim1 = 1 (lowest tier).
+  var glacPct = ee.Number(ee.Algorithms.If(
+    glac2019Val.gt(MIN_GLACIER_KM2),
+    glac2019Val.divide(basinKm2Val.max(0.001)).multiply(100),
+    0
+  ));
 
-  // D. EXPOSURE & IMPACT Calculation (0-100)
-  var popScore = popVal.divide(20000).min(1.0).multiply(50);
-  var agriScore = agriVal.divide(20).min(1.0).multiply(50);
-  var exposureScore = popScore.add(agriScore); 
+  var dim1 = ee.Number(ee.Algorithms.If(glacPct.gt(30), 5,
+    ee.Algorithms.If(glacPct.gt(15), 4,
+      ee.Algorithms.If(glacPct.gt(5),  3,
+        ee.Algorithms.If(glacPct.gt(1), 2, 1)))));
 
-  var floodImpact = floodHazard.divide(100).multiply(exposureScore).round();
+  // ── Dimension 2: 10-Year Glacier Area Loss (Sensitivity) ─────
+  // Percentage loss between 2019 and 2025 NDSI-derived extents.
+  // Measures the rate of "natural reservoir" depletion — basins losing
+  // hydrological regulation capacity fastest (Baraer et al. 2012).
+  // GUARD: if glacier < MIN_GLACIER_KM2, loss % is a mathematical
+  // artefact; set to 0 so dim2 = 1 (avoids inflated scores).
+  var lossPct10 = ee.Number(ee.Algorithms.If(
+    glac2019Val.gt(MIN_GLACIER_KM2),
+    glac2019Val.subtract(glac2025Val).divide(glac2019Val).multiply(100).max(0),
+    0
+  ));
+
+  var dim2 = ee.Number(ee.Algorithms.If(lossPct10.gt(15), 5,
+    ee.Algorithms.If(lossPct10.gt(7),  4,
+      ee.Algorithms.If(lossPct10.gt(3), 3,
+        ee.Algorithms.If(lossPct10.gt(1), 2, 1)))));
+
+  // ── Dimension 3: NDDI Anomaly (Current Environmental Stress) ─
+  // Mean NDDI (Gu et al. 2007) per basin from Sentinel-2 SR dry-season
+  // median 2022–2024. Integrates NDVI and NDWI to capture immediate
+  // water-scarcity impact on the basin's agricultural zones.
+  // Thresholds calibrated for 2000–3800m agricultural belt of the
+  // Cordillera Blanca; values > 3.5 indicate significant moisture stress.
+  var dim3 = ee.Number(ee.Algorithms.If(nddiVal.gt(5.0), 5,
+    ee.Algorithms.If(nddiVal.gt(3.5), 4,
+      ee.Algorithms.If(nddiVal.gt(2.5), 3,
+        ee.Algorithms.If(nddiVal.gt(0.5), 2, 1)))));
+
+  // ── WLC integration ────────────────────────────────────────────
+  // Equal weight to exposure (dim1), sensitivity (dim2), current stress (dim3).
+  // WLC score 1–5 → rescaled to 0–100 for consistency with flood hazard.
+  var wlcScore      = dim1.add(dim2).add(dim3).divide(3);
+  var droughtHazard = wlcScore.subtract(1).divide(4).multiply(100).round();
+
+  // ── EXPOSURE & IMPACT ─────────────────────────────────────────
+  // Population normalised to 90th percentile threshold (6,000)
+  // Agriculture mosaic (class 21 only) normalised to 20 km²
+  // Both scaled 0–50 and summed for 0–100 exposure score
+  var popScore      = popVal.divide(POP_THRESHOLD).min(1.0).multiply(50);
+  var agriScore     = agriVal.divide(20).min(1.0).multiply(50);
+  var exposureScore = popScore.add(agriScore);
+
+  // Impact = Hazard × Exposure / 100
+  var floodImpact   = floodHazard.divide(100).multiply(exposureScore).round();
   var droughtImpact = droughtHazard.divide(100).multiply(exposureScore).round();
 
-  // Attach ALL properties to the basin feature so the frontend UI can read them instantly
   return basin.set({
-    'flood_hazard': floodHazard,
-    'drought_hazard': droughtHazard,
-    'exposure_score': exposureScore.round(),
-    'flood_impact': floodImpact,
-    'drought_impact': droughtImpact
+    'flood_hazard':     floodHazard,
+    'drought_hazard':   droughtHazard,
+    'exposure_score':   exposureScore.round(),
+    'flood_impact':     floodImpact,
+    'drought_impact':   droughtImpact,
+    // Intermediate values stored for Backend 3 validation and frontend display
+    'slope_near_lakes': slopeVal,
+    'sla_deg':          slaVal,
+    'lake_growth_pct':  basinLakeGrowthPct,
+    'glac_loss_pct':    basinGlacLossPct,
+    'pop_count':        popVal,
+    'agri_km2':         agriVal,
+    'glac2019_km2':     glac2019Val,
+    'lake2021_km2':     lakeKm2Val,
+    // GDBDI intermediate values for validation and frontend display
+    'glac_pct':         glacPct,    // % glacier area — Dim 1 input
+    'loss_pct_10yr':    lossPct10,  // 2019→2025 loss % — Dim 2 input
+    'nddi_mean':        nddiVal,    // dry-season mean NDDI — Dim 3 input
+    'gdbdi_dim1':       dim1,       // standardised Dim 1 score (1–5)
+    'gdbdi_dim2':       dim2,       // standardised Dim 2 score (1–5)
+    'gdbdi_dim3':       dim3        // standardised Dim 3 score (1–5)
   });
 });
 
-// ── 3. EXPORT ─────────────────────────────────────────────────────
+// ── 4. EXPORT ─────────────────────────────────────────────────────
+// Delete the old master_basin_risk asset first before running
 Export.table.toAsset({
-  collection: basinStats,
+  collection:  basinStats,
   description: 'master_basin_risk',
-  assetId: PROJECT + 'master_basin_risk'
+  assetId:     PROJECT + 'master_basin_risk'
+});
+
+Export.table.toDrive({
+  collection:  basins,
+  description: 'basins_export',
+  fileFormat:  'GeoJSON'
 });
