@@ -693,7 +693,7 @@ Future development could incorporate higher-resolution DEMs such as TanDEM-X (12
 ## Field User Feedback
 <iframe src="https://docs.google.com/forms/d/e/1FAIpQLSfJrh8aZj19ZaZ3vomOa_uPyMDgxS6QZ7oAX5AaCsM7lW6wVw/viewform?embedded=true" width="640" height="1235" frameborder="0" marginheight="0" marginwidth="0">Loading…</iframe>
 
-## Biboliography
+## Bibliography
 
 - Chevallier, P., Pouyaud, B., Suarez, W. and Condom, T. (2011) 'Climate change threats to environment in the tropical Andes: glaciers and water resources', *Regional Environmental Change*, 11(S1), pp. 179–187. <https://doi.org/10.1007/s10113-010-0177-6>
 - Gordon, R.P., Lautz, L.K., McKenzie, J.M., Mark, B.G., Chavez, D. and Baraer, M. (2015) 'Sources and pathways of stream generation in tropical proglacial valleys of the Cordillera Blanca, Peru', *Journal of Hydrology*, 522, pp. 628–644. <https://doi.org/10.1016/j.jhydrol.2015.01.013>
