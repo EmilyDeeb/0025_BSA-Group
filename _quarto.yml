@@ -8,11 +8,12 @@ website:
   title: "CASA0025 Final Assessment"
   favicon: favicon.ico
   repo-url: https://github.com/chad-casa/0025_BSA-Group
+  repo-branch: main
   repo-actions: [edit]
   navbar:
     right:
       - icon: github
-        href: "https://github.com/EmilyDeeb/0025_BSA-Group"
+        href: "https://github.com/chad-casa/0025_BSA-Group"
   # sidebar:
   #   logo: casa_logo.png
 
@@ -21,6 +22,10 @@ format:
     theme:
       dark: darkly
       light: cosmo
+    toc: true
+    toc-location: right
+    toc-depth: 3
+    toc-title: "Table of contents"
     code-copy: true
     code-overflow: wrap
     linkcolor: "#34a832"
