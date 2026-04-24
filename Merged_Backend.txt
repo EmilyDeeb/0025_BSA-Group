@@ -7,9 +7,10 @@
 
 //var STUDY_AREA = ee.Geometry.Rectangle([-77.8, -10.0, -77.0, -8.5]);
 var PROJECT   = 'projects/cordillera-blanca-risk-app/assets/';
-var boundary = ee.FeatureCollection(PROJECT + 'boundbox').first().geometry();
-var STUDY_AREA = ee.FeatureCollection(PROJECT + 'boundbox').first().geometry();
+var PROJ_BOUND = 'projects/prueba-488410/assets/boundbox';
 
+var boundary = ee.FeatureCollection(PROJ_BOUND);
+var STUDY_AREA = boundary.first().geometry();
 
 Map.centerObject(STUDY_AREA, 10);
 Map.setOptions('SATELLITE');
