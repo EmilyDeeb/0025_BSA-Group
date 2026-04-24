@@ -4,6 +4,8 @@ author: "SQLitos: Emily Deeb, Santiago Soubie, Nadia Cabrera Salazar, Tabata Par
 date: "2026-04-24"
 title-block-banner: images/Glacierbanner.jpg
 title-block-banner-color: "white"
+toc: true
+toc-depth: 4
 ---
 <style>
 /* Light mode (default) */
