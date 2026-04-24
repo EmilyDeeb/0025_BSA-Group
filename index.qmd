@@ -2,6 +2,8 @@
 title: "Cordillera Blanca Risk App (CBRA)"
 author: "SQLitos: Emily Deeb, Santiago Soubie, Nadia Cabrera Salazar, Tabata Paredes Condor and Chad Barrett"
 date: "2026-04-24"
+title-block-banner: images/Glacierbanner.jpg
+title-block-banner-color: "white"
 ---
 <style>
 table {
