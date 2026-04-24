@@ -6,6 +6,7 @@ title-block-banner: images/Glacierbanner.jpg
 title-block-banner-color: "white"
 ---
 <style>
+/* Light mode (default) */
 table {
   border: 1px solid #dee2e6 !important;
   border-collapse: collapse !important;
@@ -17,8 +18,37 @@ table td {
 }
 table thead th {
   background-color: #f8f9fa !important;
+  color: #212529 !important;
   border-bottom: 2px solid #dee2e6 !important;
   font-weight: 600 !important;
+}
+table tbody tr:nth-child(even) {
+  background-color: #f8f9fa;
+}
+table tbody tr:hover {
+  background-color: #e9ecef;
+}
+
+/* Dark mode overrides */
+.quarto-dark table,
+.quarto-dark table th,
+.quarto-dark table td {
+  border-color: #495057 !important;
+}
+.quarto-dark table thead th {
+  background-color: #343a40 !important;
+  color: #ffffff !important;
+  border-bottom: 2px solid #495057 !important;
+}
+.quarto-dark table tbody tr {
+  background-color: transparent !important;
+  color: #ffffff !important;
+}
+.quarto-dark table tbody tr:nth-child(even) {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+.quarto-dark table tbody tr:hover {
+  background-color: rgba(255, 255, 255, 0.1) !important;
 }
 </style>
 
