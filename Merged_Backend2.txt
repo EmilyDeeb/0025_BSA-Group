@@ -4,8 +4,11 @@
 // ════════════════════════════════════════════════════════════════
 
 // ── 1. ASSETS ────────────────────────────────────────────────────
-var PROJECT   = 'projects/cordillera-blanca-risk-app/assets/';
-var STUDY_AREA = ee.FeatureCollection(PROJECT + 'boundbox').first().geometry();
+var PROJECT   = 'users/jtparedes/';
+var PROJ_BOUND = 'projects/prueba-488410/assets/boundbox';
+
+var boundary = ee.FeatureCollection(PROJ_BOUND);
+var STUDY_AREA = boundary.first().geometry();
 
 var A_lake2010  = ee.Image(PROJECT + 'lake_2010').rename('water');
 var A_lake2021  = ee.Image(PROJECT + 'lake_2021').rename('water');
@@ -130,37 +133,48 @@ var basinStats = basins.map(function(basin) {
   // ── NDDI — mean within basin ───────────────────────────────────
   // Mean NDDI over the basin captures the integrated vegetation/moisture
   // stress signal across the agricultural and pastoral zones (Gu et al. 2007).
-  var nddiVal = ee.Number(nddiImg.reduceRegion({
+  var nddiRaw = nddiImg.reduceRegion({
     reducer:   ee.Reducer.mean(),
     geometry:  basinGeom,
     scale:     20, maxPixels:1e10, tileScale:4
-  }).get('nddi', 0));
+  }).get('nddi');
+  
+  var nddiVal = ee.Number(
+    ee.Algorithms.If(nddiRaw, nddiRaw, 0)
+  );
 
   // ── Slope — max within 500m buffer of lake polygons ───────────
   // Rounce et al. (2016): mass movement assessed near lake geometry
   // Sattar et al. (2021): 45–55° avalanche zone
   var basinLakes = A_lakePoly.filterBounds(basinGeom);
 
-  var slopeVal = ee.Number(ee.Algorithms.If(
+  var slopeRaw = ee.Algorithms.If(
     basinLakes.size().gt(0),
     slope.reduceRegion({
       reducer:   ee.Reducer.max(),
       geometry:  basinLakes.geometry().buffer(500),
       scale:     30, maxPixels:1e10, tileScale:4
-    }).get('slope', 0),
-    // Fallback: no lake polygons in basin — use basin max slope
+    }).get('slope'),
     slope.reduceRegion({
       reducer:   ee.Reducer.max(),
       geometry:  basinGeom,
       scale:     30, maxPixels:1e10, tileScale:4
-    }).get('slope', 0)
-  ));
-
-  var slaVal = ee.Number(ee.Algorithms.If(
+    }).get('slope')
+  );
+  
+  var slopeVal = ee.Number(
+    ee.Algorithms.If(slopeRaw, slopeRaw, 0)
+  );
+  
+  var slaRaw = ee.Algorithms.If(
     basinLakes.size().gt(0),
     basinLakes.aggregate_mean('sla_deg'),
     0
-  ));
+  );
+  
+  var slaVal = ee.Number(
+    ee.Algorithms.If(slaRaw, slaRaw, 0)
+  );
 
   // ── FLOOD HAZARD — decision tree (Rounce et al. 2016) ─────────
   // GUARD: Basin must have a meaningful glacier OR lake for GLOF
